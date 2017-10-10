@@ -1,0 +1,13 @@
+---
+title: "Jurg's Data Pre-Processing"
+author: "Olusoji Oluwafemi Daniel"
+date: "10 October 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+## R Markdown
+
