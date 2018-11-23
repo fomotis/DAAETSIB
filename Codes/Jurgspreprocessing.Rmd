@@ -1,13 +1,2888 @@
 ---
-title: "Jurg's Data Pre-Processing"
+title: "Monocultures"
 author: "Olusoji Oluwafemi Daniel"
 date: "10 October 2017"
 output: html_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = FALSE)
+#library(Rmpi)
+#library(snow)
+#making cluster for parallelizing
+#cl <- makeCluster(mpi.universe.size()-1,type="MPI")
+library(flowCore)
+#library(flowViz)
+#library(flowTrans)
+library(flowDensity)
+library(tidyverse)
+library(stringr)
+#library(parallel)
+#library(foreach)
+#library(doParallel)
+#library(doRNG)
+
+knitr::opts_chunk$set(echo=FALSE)
+source("Codes/Functions/distances.R")
+source("Codes/Functions/good_measurement.R")
+source("Codes/Functions/lnTrans.R")
+source("Codes/Functions/nona.R")
+source("Codes/Functions/noneg.R")
+source("Codes/Functions/retain.R")
+source("Codes/Functions/plotting_functions.R")
+source("Codes/Functions/cell_debris.R")
+source("Codes/Functions/cell_debris_nc.R")
+source("Codes/Functions/redfscgoodbad.R")
+source("Codes/Functions/debris_nc.R")
+source("Codes/Functions/debris_c.R")
+source("Codes/Functions/bs4_nc.R")
+source("Codes/Functions/bs4_c.R")
+source("Codes/Functions/bs5_c.R")
+source("Codes/Functions/Margin_Cells.R")
 ```
 
-## R Markdown
+### Functions
+```{r}
+##for combining rows
+comb <- function(...) {
+  mapply('rbind', ..., SIMPLIFY=FALSE)
+}
+```
+
+
+
+### Reading in All the FCS Files
+
+```{r}
+#the metadata
+files_metadata <- list.files(path = "Data/JurgData/Exp2GrowthMetadata", full.names = T)
+files_metadata <- files_metadata[-c(2:3)]
+
+#the fcs files themselves
+files_fcs <- list.files(path = "Data/JurgData/Exp2Growth", full.names = T)
+###extracting dates of the experiment
+Time <- sapply(str_split(files_fcs[1:13], "/"), "[", 4) %>% sapply(1:13, function(i, x){
+  if (i==1) {
+    return(substr(trimws(str_split(x[[i]], "_")[[1]][2], which = "both"), start = 1, stop = 8))
+  } else if(i %in% c(2,3) ) {
+    return(trimws(str_split(x[[i]], ",")[[1]][2], which = "both"))
+  }else return(trimws(str_split(x[[i]], "_")[[1]][2], which = "both"))
+}, x = .) %>% c("28.03.17",.) %>% as.Date(x = .,format = "%d.%m.%y")
+Time <- unique(Time) 
+#removing the prior day 2 files
+files_fcs <- files_fcs[-c(2:3)]
+
+full_dataset <- vector(mode = "list",length = length(files_fcs) - 1)
+
+for(j in 1:length(full_dataset)){
+  ###file number 14 is the prelim, hence the first
+  if(j == 13){
+    file_fcs <- lapply(1:12, function(i){
+       datafile <- read.FCS(files_fcs[[j + 1]], alter.names = TRUE,
+             transformation = FALSE, emptyValue = FALSE,dataset = i)
+    })
+    #turning everything to a flowSet
+  names(file_fcs) <- sapply(file_fcs, keyword, "GTI$SAMPLEID")
+  names(file_fcs) <- gsub(",", "", names(file_fcs))
+  names(file_fcs) <- gsub(" ", "_", names(file_fcs))
+  full_dataset[[1]] <- as(file_fcs, "flowSet")
+  }else {
+    file_fcs <- lapply(1:48,function(i){
+      j <<- j
+      if(j == 2){
+        if(i %in% c(19:21,34:36,40:42,43:45) ){
+          datafile <- read.FCS(files_fcs[[13]], alter.names = TRUE,
+                 transformation = FALSE,emptyValue = FALSE,dataset = i)
+          #making sure the names remain the same
+          identifier(datafile) <- identifier(read.FCS(files_fcs[[1]],
+                                                      alter.names = TRUE,
+                 transformation = FALSE, emptyValue = FALSE, dataset = i))
+        }else{
+          datafile <- read.FCS(files_fcs[[12]], alter.names = TRUE,
+                 transformation = FALSE,emptyValue = FALSE,dataset = i)
+        }
+      }else if(j >= 3 & j <= 12){
+        datafile <- read.FCS(files_fcs[[j - 1]], alter.names = TRUE,
+                 transformation = FALSE, emptyValue = FALSE, dataset = i)
+      } else{
+              datafile <- read.FCS(files_fcs[[j]], alter.names = TRUE,
+             transformation = FALSE, emptyValue = FALSE, dataset = i)
+      }
+      datafile
+    })
+    #turning everything to a flowSet
+  names(file_fcs) <- paste(sapply(file_fcs,keyword,"GTI$SAMPLEID"),rep(1:3,16))
+  names(file_fcs) <- gsub(",","",names(file_fcs))
+  names(file_fcs) <- gsub(" ","_",names(file_fcs))
+ 
+  full_dataset[[j+1]] <- as(file_fcs,"flowSet")
+  }
+}
+#
+rm(file_fcs,files_fcs)
+#
+names(full_dataset) <- c("Prelim","Day1","Day2","Day3Dil100",
+                         "Day3Dil2000","Day4Dil100","Day4Dil2000","Day5Dil100",
+                         "Day5Dil2000","Day6Dil100","Day6Dil2000",
+                         "Day7Dil100","Day7Dil2000")
+#storing the names for titles
+pnames <- pData(phenoData(full_dataset$Day1))$name
+#removing the checks
+
+full_dataset[2:13] <- lapply(full_dataset[2:13],function(x){x[!(str_detect(pnames,"#_4_check") | str_detect(pnames,"#_5_check")) ] })
+#
+pnames <- pnames[!(str_detect(pnames,"#_4_check") | str_detect(pnames,"#_5_check"))]
+pnames_prelim <- c(paste0("#","_","4","_",c("400","200","100","50","25","Control")),
+                  paste0("#","_","5","_",c("400","200","100","50","25","Control")) )
+#
+#meta files Monoculture
+meta_files <- vector("list",13)
+
+for(k in 1:13){
+  if(k == 2){
+    meta_files[[k + 1]] <- read.csv(file = files_metadata[[12]], header = F, skip = 7, 
+                                    stringsAsFactors = F)
+    meta_files[[k + 1]][1,] <- gsub("[[:punct:]]", "", meta_files[[k + 1]][1,])
+    meta_files[[k + 1]][1,] <- gsub("[^[:alnum:]]", "", meta_files[[k + 1]][1,])
+    names(meta_files[[k + 1]]) <- meta_files[[k + 1]][1,]
+    names(meta_files[[k + 1]])[66:69] <- c("Directory","GrowthRates","Cyano","FileName")
+    #temporary for day 2 redone (file 17)
+    temp <- read.csv(file = files_metadata[[13]], header = F, skip = 7, stringsAsFactors = F)
+    meta_files[[k+1]] <- meta_files[[k+1]][-1,]
+    ##4_check_25
+    meta_files[[k+1]][str_detect(meta_files[[k+1]]$NumberofEvents," check 25") &
+                    str_detect(meta_files[[k+1]]$SampleID," # 4"),9] <- temp[c(74,75,76),9]
+    ##5_50
+    meta_files[[k+1]][str_detect(meta_files[[k+1]]$NumberofEvents," 50") &
+                    str_detect(meta_files[[k+1]]$SampleID," # 5"),9] <- temp[c(77,78,79),9]
+    ##5_Control
+    meta_files[[k+1]][str_detect(meta_files[[k+1]]$NumberofEvents," Control") &
+                    str_detect(meta_files[[k+1]]$SampleID," # 5"),9] <- temp[c(80,81,82),9]
+    
+    ##5_check_25
+    meta_files[[k+1]][str_detect(meta_files[[k+1]]$NumberofEvents," check 25") &
+                    str_detect(meta_files[[k+1]]$SampleID," # 5"),9] <- temp[c(83,84,85),9]
+    
+    
+    meta_files[[k+1]] <- meta_files[[k+1]][!(str_detect(meta_files[[k+1]]$NumberofEvents,
+                                                           "check")),]
+    meta_files[[k+1]] <- meta_files[[k+1]][!(str_detect(meta_files[[k+1]]$SampleID,
+                                                           "Negative")),]
+    
+  }else if(k>2 & k <= 12){
+    meta_files[[k+1]] <- read.csv(file=files_metadata[[k-1]],header=F,skip=7,stringsAsFactors=F)
+    meta_files[[k+1]][1,] <- gsub("[[:punct:]]","",meta_files[[k+1]][1,])
+    meta_files[[k+1]][1,] <- gsub("[^[:alnum:]]","",meta_files[[k+1]][1,])
+    names(meta_files[[k+1]]) <- meta_files[[k+1]][1,]
+    names(meta_files[[k+1]])[66:69] <- c("Directory","GrowthRates","Cyano","FileName")
+    meta_files[[k+1]] <- meta_files[[k+1]][-1,]
+    meta_files[[k+1]] <- meta_files[[k+1]][!(str_detect(meta_files[[k+1]]$NumberofEvents,
+                                                           "check")),]
+    meta_files[[k+1]] <- meta_files[[k+1]][!(str_detect(meta_files[[k+1]]$SampleID,
+                                                           "Negative")),]
+  } else if(k == 13){
+    meta_files[[1]] <- read.csv(file=files_metadata[[k+1]],header=F,skip=7,stringsAsFactors=F)
+    meta_files[[1]][1,] <- gsub("[[:punct:]]","",meta_files[[1]][1,])
+    meta_files[[1]][1,] <- gsub("[^[:alnum:]]","",meta_files[[1]][1,])
+    names(meta_files[[1]]) <- meta_files[[1]][1,]
+    #names(meta_files[[1]])[66:69] <- c("Directory","GrowthRates","Cyano","FileName")
+    meta_files[[1]] <- meta_files[[1]][-1,]
+    meta_files[[1]] <- meta_files[[1]][!(str_detect(meta_files[[1]]$NumberofEvents,
+                                                           "check")),]
+    meta_files[[1]] <- meta_files[[1]][!(str_detect(meta_files[[1]]$SampleID,
+                                                           "Negative")),]
+  }else{
+    meta_files[[k+1]] <- read.csv(file=files_metadata[[k]],header=F,skip=7,stringsAsFactors=F)
+    meta_files[[k+1]][1,] <- gsub("[[:punct:]]","",meta_files[[k+1]][1,])
+    meta_files[[k+1]][1,] <- gsub("[^[:alnum:]]","",meta_files[[k+1]][1,])
+    names(meta_files[[k+1]]) <- meta_files[[k+1]][1,]
+    names(meta_files[[k+1]])[66:69] <- c("Directory","GrowthRates","Cyano","FileName")
+    meta_files[[k+1]] <- meta_files[[k+1]][-1,]
+    meta_files[[k+1]] <- meta_files[[k+1]][!(str_detect(meta_files[[k+1]]$NumberofEvents,
+                                                           "check")),]
+    meta_files[[k+1]] <- meta_files[[k+1]][!(str_detect(meta_files[[k+1]]$SampleID,
+                                                           "Negative")),]
+  }
+}
+
+names(meta_files) <- paste0(c("Prelim","Day1","Day2","Day3Dil100",
+                         "Day3Dil2000","Day4Dil100","Day4Dil2000","Day5Dil100",
+                         "Day5Dil2000","Day6Dil100","Day6Dil2000",
+                         "Day7Dil100","Day7Dil2000"),"MetaFile")
+
+rm(files_metadata,temp)
+
+
+################################ Invasion ##########################################
+#the metadata
+files_metadata_invasion <- list.files(path="Data/JurgData/Exp3InvasionGrowthdata",
+                                      full.names=T)
+
+#the fcs files themselves
+files_fcs_invasion <- list.files(path="Data/JurgData/Exp3Invasion", full.names = T)[-13]
+
+Time_invasion <- sapply(str_split(files_fcs_invasion, "/"), "[",4) %>% sapply(1:12, function(i, x){
+  if (i %in% c(1,2,3)) {
+    return(substr(trimws(str_split(x[[i]], "_")[[1]][2], which = "both"), start = 1, stop = 8))
+  } else return(substr(trimws(str_split(x[[i]], "_")[[1]][2], which = "both"), start = 1, stop = 8))
+},x = .) %>% as.Date(x = ., format = "%d.%m.%y")
+Time_invasion  <-  unique(Time_invasion)
+
+full_dataset_invasion <- vector(mode="list", length = length(files_fcs_invasion))
+
+for (j in 1:length(full_dataset_invasion)) {
+    file_fcs_invasion <- lapply(1:48, function(i) {
+      j <<- j
+      datafile <- read.FCS(files_fcs_invasion[[j]], alter.names = TRUE,
+                 transformation = FALSE, emptyValue = FALSE, dataset = i)
+      datafile
+      })
+  #turning everything to a flowSet
+  names(file_fcs_invasion) <- paste(sapply(file_fcs_invasion, keyword, "GTI$SAMPLEID"), rep(1:3,16))
+  names(file_fcs_invasion) <- gsub(",","", names(file_fcs_invasion))
+  names(file_fcs_invasion) <- gsub(" ","_", names(file_fcs_invasion))
+  full_dataset_invasion[[j]] <- as(file_fcs_invasion, "flowSet")
+}
+
+#storing the names for titles
+rm(files_fcs_invasion, file_fcs_invasion)
+names(full_dataset_invasion) <- c("Day1Dil100","Day1Dil2000","Day1Dilmix","Day2","Day3",
+                         "Day4","Day5","Day6","Day7",
+                         "Day8","Day9","Day10")
+
+pnames <- pData(phenoData(full_dataset_invasion$Day1Dil100))$name
+#removing the checks
+full_dataset_invasion <- lapply(full_dataset_invasion, function(x){x[!(str_detect(pnames, "#_4_check") | str_detect(pnames,"#_5_check")) ] })
+#
+pnames <- pnames[!(str_detect(pnames,"#_4_check") | str_detect(pnames,"#_5_check"))]
+#
+names(full_dataset_invasion) <- c("Day1Dil100","Day1Dil2000","Day1Dilmix","Day2","Day3",
+                         "Day4","Day5","Day6","Day7",
+                         "Day8","Day9","Day10")
+#meta files invasion
+meta_files_invasion <- vector("list", length(files_metadata_invasion))
+for (k in 1:length(files_metadata_invasion)){
+  meta_files_invasion[[k]] <- read.csv(file = files_metadata_invasion[[k]],
+                                       header = F, skip = 7, stringsAsFactors = F)
+  meta_files_invasion[[k]][1, ] <- gsub("[[:punct:]]", "", meta_files_invasion[[k]][1, ])
+  meta_files_invasion[[k]][1, ] <- gsub("[^[:alnum:]]", "" , meta_files_invasion[[k]][1, ])
+  names(meta_files_invasion[[k]]) <- meta_files_invasion[[k]][1, ]
+  names(meta_files_invasion[[k]])[66:69] <- c("Directory", "GrowthRates", "Cyano", "FileName")
+  meta_files_invasion[[k]] <- meta_files_invasion[[k]][-1, ]
+  meta_files_invasion[[k]] <- meta_files_invasion[[k]][!(
+    str_detect(meta_files_invasion[[k]]$NumberofEvents, "check")),]
+  meta_files_invasion[[k]] <- meta_files_invasion[[k]][!(
+    str_detect(meta_files_invasion[[k]]$SampleID, "Negative")), ]
+}
+names(meta_files_invasion) <- paste0(c("Day1Dil100", "Day1Dil2000", "Day1Dilmix", "Day2", "Day3",
+                         "Day4", "Day5", "Day6", "Day7",
+                         "Day8", "Day9", "Day10"), "MetaFile")
+rm(files_metadata_invasion)
+```
+
+### Can Measurements be Trusted?
+
+```{r}
+counter2 <- 0
+counter <- 0
+good_measurements <- lapply(full_dataset, function (x){
+  counter2 <<- counter2 + 1
+  ttt2 <- fsApply(x,function (y) {
+    counter <<- counter + 1
+    ttt <- goodfcs(fcsfile = y, metafile = meta_files[[counter2]],
+                    CpermL = "TotalVolumeL", rowinmetafile=counter)
+  }) %>% do.call(rbind.data.frame, .)
+  counter <<- 0
+  return(ttt2)
+}) 
+
+good_measurements[2:13] <- lapply(good_measurements[2:13], function (x) {
+    data.frame(x, Filename = pnames)
+})
+
+good_measurements$Prelim$Filename <- c(paste0("#","_","4","_",c("400","200","100","50","25","Control")),
+                                       paste0("#","_","5","_",c("400","200","100","50","25","Control")) )
+
+####################### Invasion ######################################
+counter2 <- 0
+counter <- 0
+good_measurements_invasion <- lapply(full_dataset_invasion, function(x){
+  counter2 <<- counter2 + 1
+  ttt2 <- fsApply(x, function (y) {
+    counter <<- counter + 1
+    ttt <- goodfcs(fcsfile = y, metafile = meta_files_invasion[[counter2]],
+                    CpermL = "TotalVolumeL", rowinmetafile=counter)
+  }) %>% do.call(rbind.data.frame, .)
+  counter <<- 0
+  return(ttt2)
+})
+
+good_measurements_invasion <- lapply(good_measurements_invasion, function (x) {
+  data.frame(x, FileName = pnames)
+})
+```
+
+
+### Filtering out only the good files
+
+```{r}
+#full_dataset_good <-  vector("list", 8)
+
+full_dataset_good <-  NULL #full_dataset_invasion[2:12]
+#for( i in 2:length(good_measurements) ){
+#  if(sum(as.character(good_measurements[[i]]$status) == "good") < 36){
+#    full_dataset_good[i] <- NULL
+#  }else {
+#    full_dataset_good[i] <- full_dataset[i]
+#  }
+#}
+#full_dataset_good[1] <- full_dataset[1]
+
+#for(i in 1:length(full_dataset_good)){
+#  if(!is.null(full_dataset_good[[i]])){
+#    names(full_dataset_good)[i] <- names(full_dataset)[i]
+#  }else names(full_dataset_good)[i] <- "Not"
+#}
+
+##filtering out the bad files
+#full_dataset_good <- full_dataset_good[names(
+#                              full_dataset_good) != "Not"]
+
+full_dataset_good[1:3] <- full_dataset[1:3]
+
+full_dataset_good[4:8] <- lapply(seq(4, 12, by = 2), function (i, x, y) {
+  rets <- retain(x = x[[i]], y = x[[i+1]], dil_x = "100", dil_y = "2000")
+  outs <- vector("list", 36)
+    for(j in 1:36){
+      if( (identifier(y[[i]][[j]]) == rets$Filename[j]) & rets$Dilution[j] == "100" ){
+       outs[[j]] <- y[[i]][[j]]
+      
+      } else if( (identifier(y[[i]][[j]]) == rets$Filename[j]) & rets$Dilution[j] == "2000") {
+       outs[[j]] <- y[[i+1]][[j]]
+       identifier(outs[[j]]) <- rets$Filename[j]
+      }
+    }
+  fresult <- as(outs, "flowSet")
+ identifier(fresult) <- sapply(1:36, function(j){
+   good_measurements$Day2$Filename[j]
+ })
+ return(fresult)
+}, x = good_measurements, y = full_dataset)
+
+names(full_dataset_good) <- c("Prelim", paste0("Day",1:7))
+
+#setting back the identifiers
+lapply(4:8, function(i) {
+  sapply(1:36, function (j) {
+    identifier(full_dataset_good[[i]][[j]]) <- good_measurements$Day2$Filename[j]
+  })
+})
+
+#for day 3 and above
+Retained <- lapply(seq(4, 12, by = 2), function (i, x) {
+  rets <- retain(x = x[[i]], y = x[[i+1]], dil_x = "100", dil_y = "2000")
+}, x = good_measurements)
+
+
+###################### Invasion ###############################
+full_dataset_good_invasion <-  NULL #full_dataset_invasion[2:12]
+for( i in 1:length(good_measurements_invasion) ){
+  if(i <= 3 & sum(as.character(good_measurements_invasion[[i]]$status) == "good") < 36){
+    full_dataset_good_invasion[i] <- NULL
+  }else {
+    full_dataset_good_invasion[i] <- full_dataset_invasion[i]
+  }
+}
+
+for(i in 1:length(full_dataset_good_invasion)){
+  if(!is.null(full_dataset_good_invasion[[i]])){
+    names(full_dataset_good_invasion)[i] <- names(full_dataset_invasion)[i]
+  }else names(full_dataset_good_invasion)[i] <- "Not"
+}
+
+##filtering out the bad files
+full_dataset_good_invasion <- full_dataset_good_invasion[names(
+                              full_dataset_good_invasion) != "Not"]
+
+#for day 3 and above
+#Retained_invasion <- lapply(seq(4, 12, by = 2), function (i, x) {
+#  rets <- retain(x = x[[i]], y = x[[i+1]], dil_x = "100", dil_y = "2000")
+#}, x = good_measurements)
+
+rm(full_dataset,full_dataset_invasion)
+```
+
+### Transformation (Log Transformation)
+
+```{r}
+#original particle count
+ParticleCount <- lapply(full_dataset_good, function(x) {
+  fsApply(x ,nrow)
+})
+#removing NAs
+NonNas <- lapply(full_dataset_good, function (x) {
+  fsApply(x, function (y) {
+    nona(y)
+  })
+})
+
+#filtering out the positive values
+NonNegatives <- lapply(NonNas, function (x) {
+   fsApply(x, function (y) {
+     noneg(y)
+   })
+})
+
+#Biexponential Transformation
+
+#Archsinh Transformation
+
+#logtransformation using flowCore tools
+logTrans <- flowCore::lnTransform("default-log", r = 1, d = 1)
+cnames <- colnames(full_dataset_good$Prelim[[1]])
+tranlist <- transformList(cnames[!(cnames %in% c("SSC.W", "TIME"))], logTrans)
+log_transformedSet <- lapply(NonNegatives, function(x) {
+  fsApply(x, function(y) {
+    y_trans <- flowCore::transform(y, tranlist)
+    flowCore::identifier(y_trans) <- flowCore::identifier(y)
+    return(y_trans)
+  })
+})
+
+#setting back the identifiers
+lapply(2:8, function(i) {
+  sapply(1:36, function (j) {
+    identifier(log_transformedSet[[i]][[j]]) <- identifier(full_dataset_good[[i]][[j]])
+  })
+})
+
+
+#log Transformation
+log_transformedSet <- lapply(NonNegatives, function(x, ntt) {
+   fsApply(x, function (y, ntt2) {
+     lnTrans(y, notToTransform = ntt2)
+   },ntt2 = ntt)
+},ntt = c("SSC.W", "TIME"))
+
+lapply(4:8, function(i) {
+  sapply(1:36, function (j) {
+    identifier(log_transformedSet[[i]][[j]]) <- good_measurements$Day2$Filename[j]
+  })
+})
+
+rm(NonNas, NonNegatives)
+
+##########################  Invasion  ########################
+
+#original particle count
+ParticleCount_invasion <- lapply(full_dataset_good_invasion[c(1, 3:11)], function(x){
+  fsApply(x, nrow)
+})
+
+#filtering out the positive values
+NonNegatives_invasion <- lapply(full_dataset_good_invasion, function(x) {
+   fsApply(x, function(y) {
+     noneg(y)
+   })
+})
+
+NonNas_invasion <- lapply(NonNegatives_invasion, function(x) {
+  fsApply(x, function(y) {
+    nona(y)
+  })
+})
+
+#log Transformation
+log_transformedSet_invasion <- lapply(NonNas_invasion, function(x, ntt){
+   fsApply(x, function(y, ntt2){
+     lnTrans(y, notToTransform = ntt2)
+   },ntt2 = ntt)
+},ntt = c("SSC.W","TIME"))
+
+rm(NonNas_invasion, NonNegatives_invasion)
+```
+
+### Margin Events
+
+```{r}
+#filtering out margin evets
+logtrans_margin <- lapply(log_transformedSet, function(x) {
+  dlist <- fsApply(x, function(y, ch, typ){
+    cellmargin(y, Channel = ch, type = "estimate")$reducedflowframe
+  }, ch = "SSC.W")
+})
+
+#Some problem with day 6
+cellmargin_special <- function(flow.frame, Channel = "SSC.W") {
+    infl_point1 <- flowDensity::deGate(flow.frame, Channel, bimodal = T)
+    infl_point2 <- flowDensity::deGate(flow.frame, Channel, use.upper = T, upper = T)
+    #plotting
+    flowDensity::plotDens(flow.frame, c(Channel, "FSC.HLin"), main = identifier(flow.frame))
+    abline(v = infl_point1, lwd = 1, lty = 4, col = 2)
+    abline(v = infl_point2, lwd = 1, lty = 4, col = 2)
+    
+    margin.ind <- ifelse(exprs(flow.frame)[, Channel] > infl_point1 & 
+                           exprs(flow.frame)[, Channel] < infl_point2, 
+                          T , F) #FALSE=Margin Event
+    n_margin <- sum(margin.ind == F) #part of output
+    
+    #constructing full flow frame with both margin and non-margin events
+    exx <- as.matrix(cbind(exprs(flow.frame), as.numeric(margin.ind))) #1=not margin, 0=margin
+    colnames(exx)[ncol(exx)] <- 'Margin.Indicator' #1 = not amrgin, 0 = margin
+    
+    #constructing the annotated data frame for the parameter
+    ddata <- data.frame(rbind(flow.frame@parameters@data,
+                              c("Margin.Indicator", "Margin Indicator", 1, 0, 1)))
+    row.names(ddata) <- c(row.names(flow.frame@parameters@data), paste0("$", "P", ncol(exx)))
+    dvarMetadata <- flow.frame@parameters@varMetadata
+    ddimnames <- flow.frame@parameters@dimLabels
+    paraa <- Biobase::AnnotatedDataFrame(data = ddata, varMetadata = dvarMetadata, 
+                                         dimLabels = ddimnames)
+    describe <- flow.frame@description
+    fflowframe <- new("flowFrame", exprs = exx, parameters = paraa, description = describe)
+    
+    #constructing flowframe with only the non margin events
+    exx2 <- exx[exx[,'Margin.Indicator'] == 1, ]
+    rflowframe <- new("flowFrame", exprs = exx2, parameters = paraa, description = describe)
+    return(list(reducedflowframe = rflowframe, fullflowframe = fflowframe, N_margin = n_margin,
+              N_cell = nrow(rflowframe), N_particle = nrow(fflowframe)))
+}
+cellmargin_special2 <- function(flow.frame, Channel = "SSC.W") {
+    infl_point1 <- flowDensity::deGate(flow.frame, Channel, bimodal = T)
+    infl_point2 <- flowDensity::deGate(flow.frame, Channel, after.peak = T)
+    #plotting
+    flowDensity::plotDens(flow.frame, c(Channel, "FSC.HLin"), main = identifier(flow.frame))
+    abline(v = infl_point1, lwd = 1, lty = 4, col = 2)
+    abline(v = infl_point2, lwd = 1, lty = 4, col = 2)
+    
+    margin.ind <- ifelse(exprs(flow.frame)[, Channel] > infl_point1 & 
+                           exprs(flow.frame)[, Channel] < infl_point2, 
+                          T , F) #FALSE=Margin Event
+    n_margin <- sum(margin.ind == F) #part of output
+    
+    #constructing full flow frame with both margin and non-margin events
+    exx <- as.matrix(cbind(exprs(flow.frame), as.numeric(margin.ind))) #1=not margin, 0=margin
+    colnames(exx)[ncol(exx)] <- 'Margin.Indicator' #1 = not amrgin, 0 = margin
+    
+    #constructing the annotated data frame for the parameter
+    ddata <- data.frame(rbind(flow.frame@parameters@data,
+                              c("Margin.Indicator", "Margin Indicator", 1, 0, 1)))
+    row.names(ddata) <- c(row.names(flow.frame@parameters@data), paste0("$", "P", ncol(exx)))
+    dvarMetadata <- flow.frame@parameters@varMetadata
+    ddimnames <- flow.frame@parameters@dimLabels
+    paraa <- Biobase::AnnotatedDataFrame(data = ddata, varMetadata = dvarMetadata, 
+                                         dimLabels = ddimnames)
+    describe <- flow.frame@description
+    fflowframe <- new("flowFrame", exprs = exx, parameters = paraa, description = describe)
+    
+    #constructing flowframe with only the non margin events
+    exx2 <- exx[exx[,'Margin.Indicator'] == 1, ]
+    rflowframe <- new("flowFrame", exprs = exx2, parameters = paraa, description = describe)
+    return(list(reducedflowframe = rflowframe, fullflowframe = fflowframe, N_margin = n_margin,
+              N_cell = nrow(rflowframe), N_particle = nrow(fflowframe)))
+}
+ #5_control_2
+logtrans_margin$Day6[[35]] <- cellmargin_special(log_transformedSet$Day6[[35]])$reducedflowframe
+#5_25_1
+logtrans_margin$Day6[[31]] <- cellmargin_special(log_transformedSet$Day6[[31]])$reducedflowframe
+#4_control_2
+logtrans_margin$Day6[[17]] <- cellmargin_special2(log_transformedSet$Day6[[17]])$reducedflowframe
+#4_25_1
+logtrans_margin$Day6[[13]] <- cellmargin_special2(log_transformedSet$Day6[[13]])$reducedflowframe
+#4_100_3
+logtrans_margin$Day6[[9]] <- cellmargin_special2(log_transformedSet$Day6[[9]])$reducedflowframe
+#4_200_2
+logtrans_margin$Day6[[5]] <- cellmargin_special2(log_transformedSet$Day6[[5]])$reducedflowframe
+
+#setting back the identifiers
+lapply(2:8, function(i) {
+  sapply(1:36, function (j) {
+    identifier(logtrans_margin[[i]][[j]]) <- identifier(full_dataset_good[[i]][[j]])
+  })
+})
+
+#dataframe for the margin data
+logtrans_margin_dataset <- lapply(log_transformedSet, function(x) {
+  fsApply(x, function(y, ch, typ){
+    ttt1 <- cellmargin(y, Channel = ch, type = "estimate")
+    nmargin <- ttt1$N_margin
+    ncell <- ttt1$N_cell
+    nparticle <- ttt1$N_particle
+    return(data.frame(ncell = ncell, nmargin = nmargin, nparticle = nparticle,
+                      File = identifier(ttt1$reducedflowframe) ))
+  },ch = "SSC.W") %>% do.call(rbind.data.frame, .)
+})
+
+#
+special <- lapply(c(5, 9, 13, 17, 31, 35), function(i) {
+  if(i == 31 | i == 35) {
+    ttt1 <- cellmargin_special(log_transformedSet$Day6[[i]])
+    } else ttt1 <- cellmargin_special2(log_transformedSet$Day6[[i]])
+    nmargin <- ttt1$N_margin
+    ncell <- ttt1$N_cell
+    nparticle <- ttt1$N_particle
+  return(data.frame(ncell = ncell, nmargin = nmargin, nparticle = nparticle, 
+                    File = identifier(ttt1$reducedflowframe)))
+})
+
+#replacing the wrong ones
+logtrans_margin_dataset$Day6[5, ] <- special[[1]]
+logtrans_margin_dataset$Day6[9, ] <- special[[2]]
+logtrans_margin_dataset$Day6[13, ] <- special[[3]]
+logtrans_margin_dataset$Day6[17, ] <- special[[4]]
+logtrans_margin_dataset$Day6[31, ] <- special[[5]]
+logtrans_margin_dataset$Day6[35, ] <- special[[6]]
+rm(special)
+
+```
+
+### Removing and Flagging Debris
+
+```{r}
+#giving the identifiers
+#fsApply(1:length(log_transformedSet$Prelim), FUN=function(i,x){
+#flowCore::identifier(x[[i]]) <- pnames_prelim[i]
+#}, x = log_transformedSet$Prelim)
+
+#only day 1 gates will be used
+BS4_control <- lapply(1:length(logtrans_margin), FUN = function (i, x) {
+                      if (i > 1) x[[i]][str_detect(pnames,"#_4_Control")] else 
+                        x[[i]][str_detect(pnames_prelim, "#_4_Control")]
+                        }, x = logtrans_margin)
+BS5_control <- lapply(1:length(logtrans_margin),
+                      function(i, x){
+                        if (i > 1) x[[i]][str_detect(pnames,"#_5_Control")] else
+                          x[[i]][str_detect(pnames_prelim, "#_5_Control")]
+                        }, x = logtrans_margin)
+
+counter <- 0
+logtrans_debris_percent <- lapply(logtrans_margin, function(x){
+  if (length(x) < 36) {
+    debris_percentage <- fsApply(x, function (y) {
+    counter <<- counter + 1
+      if (counter <= 6) {
+          ttt <- celldebris(y, positions = c(F, NA), control_use = c(T, T), 
+                            interest = "BS4",
+               control_flowFrame = c(BS4_control[[1]][[1]], BS4_control[[1]][[1]]),
+               mono_control = BS4_control[[1]][[1]])
+          Cell_count <- ttt$Cell_count
+          N_particle <- ttt$N_particle
+          N_others <- ttt$N_others
+      } else {
+        ttt <- celldebris(y, positions = c(F, NA), control_use = c(T, T), 
+                            interest = "BS5",
+               control_flowFrame = c(BS5_control[[1]][[1]], BS5_control[[1]][[1]]),
+               mono_control = BS5_control[[1]][[1]])
+          Cell_count <- ttt$Cell_count
+          N_particle <- ttt$N_particle
+          N_others <- ttt$N_others
+      }
+        return(data.frame(CyanoCount = Cell_count, DebrisCount = N_particle - (Cell_count + N_others),
+                          ParticleCount = N_particle,
+                          N_others = N_others))
+    })
+  } else {
+      debris_percentage <- fsApply(x, function(y){
+    counter <<- counter + 1
+    if(counter <= 18 & substring(identifier(y), first = nchar(identifier(y))) == "1"){
+        ttt <- celldebris(y, positions = c(F,NA), control_use = c(T, T),interest = "BS4",
+               control_flowFrame = c(BS4_control[[2]][[1]], BS4_control[[2]][[1]]),
+               mono_control = BS4_control[[2]][[1]])
+          Cell_count <- ttt$Cell_count
+          N_particle <- ttt$N_particle
+          N_others <- ttt$N_others
+      } else if(counter <= 18 & substring(identifier(y), first = nchar(identifier(y))) == "2"){
+        #counter <<- counter + 1
+        ttt <- celldebris(y, positions = c(F, NA),control_use = c(T, T), interest = "BS4",
+               control_flowFrame = c(BS4_control[[2]][[2]], BS4_control[[2]][[2]]),
+               mono_control = BS4_control[[2]][[1]])
+          Cell_count <- ttt$Cell_count
+          N_particle <- ttt$N_particle
+          N_others <- ttt$N_others
+      } else if(counter <= 18 & substring(identifier(y), first = nchar(identifier(y))) == "3"){
+        #counter <<- counter + 1
+        ttt <- celldebris(y,positions = c(F, NA), control_use = c(T,T),interest = "BS4",
+               control_flowFrame = c(BS4_control[[2]][[3]], BS4_control[[2]][[3]]),
+               mono_control = BS4_control[[2]][[1]])
+          Cell_count <- ttt$Cell_count
+          N_particle <- ttt$N_particle
+          N_others <- ttt$N_others
+      } else if((counter > 18 & counter <= 36) & substring(identifier(y),
+            first = nchar(identifier(y))) == "1"){
+        #counter <<- counter + 1
+          ttt <- celldebris(y,positions = c(F, NA), control_use = c(T, T),interest = "BS5",
+               control_flowFrame = c(BS5_control[[2]][[1]], BS5_control[[2]][[1]]),
+               mono_control = BS5_control[[2]][[3]])
+          Cell_count <- ttt$Cell_count
+          N_particle <- ttt$N_particle
+          N_others <- ttt$N_others
+      }else if((counter > 18 & counter <= 36) & substring(identifier(y),
+              first=nchar(identifier(y))) == "2"){
+        #counter <<- counter + 1
+        ttt <- celldebris(y, positions = c(F, NA), control_use = c(T, T), interest = "BS5",
+               control_flowFrame = c(BS5_control[[2]][[2]], BS5_control[[2]][[2]]),
+               mono_control = BS5_control[[2]][[3]])
+          Cell_count <- ttt$Cell_count
+          N_particle <- ttt$N_particle
+          N_others <- ttt$N_others
+        }else if((counter > 18 & counter <= 36) & substring(identifier(y),
+              first=nchar(identifier(y))) == "3"){
+        #counter <<- counter + 1
+          ttt <- celldebris(y,positions = c(F, NA), control_use = c(T, T),interest = "BS5",
+               control_flowFrame = c(BS5_control[[2]][[3]], BS5_control[[2]][[3]]),
+               mono_control = BS5_control[[2]][[3]])
+          Cell_count <- ttt$Cell_count
+          N_particle <- ttt$N_particle
+          N_others <- ttt$N_others
+      }
+      return(data.frame(CyanoCount = Cell_count, DebrisCount = N_particle - (Cell_count + N_others),
+                          ParticleCount = N_particle,
+                          N_others = N_others))
+    })
+  }
+  counter <<- 0
+  debris <- debris_percentage
+  return(debris)
+})
+
+#goods_good <- good_measurements[names(good_measurements) %in% names(full_dataset_good)]
+
+#if 2000 was used for the time > 3
+#debris_count_data <- lapply(1:length(logtrans_debris_percent), function(i, x){
+#    names(logtrans_debris_percent)[4:8] <- paste0(names(logtrans_debris_percent)[4:8], "Dil2000")
+#    gg <- good_measurements[names(good_measurements) %in% names(logtrans_debris_percent)]
+#    y <- do.call(rbind.data.frame,x[[i]]) %>% mutate(CPML = gg[[i]]$CML)
+#  
+#  if(i == 1) y$FileName <- pnames_prelim else y$FileName <- pnames
+#  return(y)
+#}, x = logtrans_debris_percent) %>% do.call(rbind.data.frame, .)
+
+#if retained function was used
+debris_count_data <- lapply(1:length(logtrans_debris_percent), function(i, x){
+  if(i <= 3){
+    y <- do.call(rbind.data.frame,x[[i]]) %>% mutate(CPML = good_measurements[[i]]$CML)
+  } else y <- do.call(rbind.data.frame,x[[i]]) %>% mutate(CPML = Retained[[i-3]]$CML)
+  
+  if(i == 1) y$FileName <- pnames_prelim else y$FileName <- pnames
+  return(y)
+}, x = logtrans_debris_percent) %>% do.call(rbind.data.frame, .)
+
+debris_count_data$OParticleCount <- unlist(ParticleCount)
+
+debris_count_data$Time <- rep(Time, times = c(12, rep(36, 7)) )
+
+debris_count_data$Treatment <- sapply(debris_count_data$FileName,
+                                      function(x)strsplit(x, "_")[[1]][3])
+debris_count_data$Treatment[debris_count_data$Treatment=="Control"] <- "0"
+#debris_count_data$Treatment <- factor(debris_count_data$Treatment,
+#                                      unique(debris_count_data$Treatment)[6:1])
+debris_count_data$Species <- sapply(debris_count_data$FileName,
+                                      function(x)strsplit(x,"_")[[1]][2])
+debris_count_data$Replicate <- sapply(debris_count_data$FileName,
+                                      function(x)strsplit(x, "_")[[1]][4])
+
+#rm(logtrans_debris_percent)
+
+
+######################## Invasion ####################
+###Control from Monoculture Experiments
+#Day 1 flow frames from the monoculture experiments is used
+
+counter <- 0
+logtrans_debris_percent_invasion <- lapply(log_transformedSet_invasion[c(1,3:11)],function(x){
+  #counter2 <<- counter2 + 1
+  debris_percentage <- fsApply(x, function(y){
+    counter <<- counter+1
+    if(counter <= 18 & substring(identifier(y),first = nchar(identifier(y))) == "1"){
+        ttt <- celldebris(y, positions = c(F,NA), control = T, control_use = c(T, T), interest = "Both",
+               control_flowFrame = c(BS5_control[[2]][[1]], BS5_control[[2]][[1]]),
+               b4_control = BS4_control[[2]][[1]],
+               b5_control = BS5_control[[2]][[1]])
+        a <- ttt$Cell_count
+        b <- ttt$N_particle
+      } else if(counter <= 18 & substring(identifier(y), first = nchar(identifier(y))) == "2"){
+        #counter <<- counter + 1
+        ttt <- celldebris(y,positions = c(F,NA),control = T,control_use = c(T,T),interest = "Both",
+               control_flowFrame = c(BS5_control[[2]][[2]], BS5_control[[2]][[2]]),
+               b4_control = BS4_control[[2]][[2]],
+               b5_control = BS5_control[[2]][[2]])
+        a <- ttt$Cell_count
+        b <- ttt$N_particle
+      }else if(counter <= 18 & substring(identifier(y),first = nchar(identifier(y))) == "3"){
+        #counter <<- counter + 1
+        ttt <- celldebris(y,positions = c(F,NA),control = T,control_use = c(T,T),interest = "Both",
+               control_flowFrame=c(BS5_control[[2]][[3]],BS5_control[[2]][[3]]),
+               b4_control=BS4_control[[2]][[3]],
+               b5_control=BS5_control[[2]][[3]])
+        a <- ttt$Cell_count
+        b <- ttt$N_particle
+      }else if((counter > 18 & counter <= 36) & substring(identifier(y),
+            first=nchar(identifier(y)))=="1"){
+        #counter <<- counter + 1
+        ttt <- celldebris(y, positions = c(F,NA),control = T,control_use = c(T,T),interest = "Both",
+               control_flowFrame = c(BS5_control[[2]][[1]], BS5_control[[2]][[1]]),
+               b4_control = BS4_control[[2]][[1]],
+               b5_control = BS5_control[[2]][[1]])
+        a <- ttt$Cell_count
+        b <- ttt$N_particle
+      }else if((counter > 18 & counter <= 36) & substring(identifier(y),
+              first=nchar(identifier(y)))=="2"){
+        ttt <- celldebris(y, positions = c(F,NA), control = T, control_use = c(T, T), interest = "Both",
+               control_flowFrame = c(BS5_control[[2]][[2]], BS5_control[[2]][[2]]),
+               b4_control = BS4_control[[2]][[2]],
+               b5_control = BS5_control[[2]][[2]])
+        a <- ttt$Cell_count
+        b <- ttt$N_particle
+      }else if((counter > 18 & counter <= 36) & substring(identifier(y),
+              first=nchar(identifier(y))) == "3"){
+        ttt <- celldebris(y,positions = c(F, NA), control = T, control_use = c(T, T), interest = "Both",
+               control_flowFrame = c(BS5_control[[2]][[3]], BS5_control[[2]][[3]]),
+               b4_control = BS4_control[[2]][[3]],
+               b5_control = BS5_control[[2]][[3]])
+        a <- ttt$Cell_count
+        b <- ttt$N_particle
+     }
+    return(data.frame(BS4Count = a[1], BS5Count = a[2], ParticleCount = b))
+  })
+  counter <<- 0
+  debris <- debris_percentage
+  #colnames(debris_percentage) <- c("DebrisCount","ParticleCount")
+  return(debris)
+})
+
+goods_good_invasion <- good_measurements_invasion[names(good_measurements_invasion) %in% names(full_dataset_good_invasion)]
+
+debris_count_invasion_data <- lapply(1:length(logtrans_debris_percent_invasion), function(i, x){
+  gg <- good_measurements_invasion[names(good_measurements_invasion) %in% 
+                                     names(logtrans_debris_percent_invasion)]
+  y <- do.call(rbind.data.frame,x[[i]]) %>% mutate(CPML = gg[[i]]$CML,
+                                                   FileName = pnames)
+  return(y)
+}, x = logtrans_debris_percent_invasion) %>% do.call(rbind.data.frame,.)
+
+debris_count_invasion_data$OParticleCount <- unlist(ParticleCount_invasion)
+
+debris_count_invasion_data$Time <- rep(Time_invasion, each = 36)
+debris_count_invasion_data$Treatment <- sapply(debris_count_invasion_data$FileName,
+                                      function(x)strsplit(x,"_")[[1]][3])
+debris_count_invasion_data$Treatment[debris_count_invasion_data$Treatment=="Control"] <- "0"
+debris_count_invasion_data$Treatment <- factor(debris_count_invasion_data$Treatment,
+                                      unique(debris_count_invasion_data$Treatment)[6:1])
+debris_count_invasion_data$Resident_Species <- sapply(debris_count_invasion_data$FileName,
+                                      function(x)strsplit(x,"_")[[1]][2])
+debris_count_invasion_data$Replicate <- sapply(debris_count_invasion_data$FileName,
+                                      function(x)strsplit(x,"_")[[1]][4])
+rm(BS4_control,BS5_control)
+```
+
+
+### Flagging Doublets 
+
+```{r}
+#creating indicator for doublets in the flowframe
+logtrans_doublet_flagged <- lapply(logtrans_debris_filtered,function(x){
+  counter2 <<- counter2 + 1
+  ttt2 <- fsApply(x, function(y){
+      if(counter <= 18){
+        counter <<- counter + 1
+        ttt <- celldoublets(y,positions=c(F,F),type="manual",manualgatetype="ellipsoid",
+                            control=F,control_use=c(F,F))$fullframe
+      } else if(counter > 18 & counter <= 36){
+        counter <<- counter + 1
+        ttt <- celldoublets(y,positions=c(F,F),type="manual",manualgatetype="ellipsoid",
+                            control_use=c(F,F))$fullframe
+     }
+    return(ttt)
+  })
+  counter <<- 0
+  return(ttt2)
+})
+
+
+#obtiaining the number of doublets
+counter2 <- 0
+counter <- 0
+logtrans_doublet_percent <- lapply(logtrans_debris_filtered,function(x){
+  counter2 <<- counter2 + 1
+  ttt2 <- fsApply(x, function(y){
+      if(counter <= 18){
+        counter <<- counter + 1
+        ttt <- celldoublets(y,positions=c(F,F),type="manual",manualgatetype="ellipsoid",
+                            control=F,control_use=c(F,F))
+       result <- data.frame(NumberOfSinglets=ttt$N_Singlets,NumberOfCells=ttt$N_Cells,
+                            PercentSinglets=ttt$N_Singlets/ttt$N_Cells * 100)
+      } else if(counter > 18 & counter <= 36){
+        counter <<- counter + 1
+        ttt <- celldoublets(y,positions=c(F,F),type="manual",manualgatetype="ellipsoid",
+                            control_use=c(F,F))
+       result <- data.frame(NumberOfSinglets=ttt$N_Singlets,NumberOfCells=ttt$N_Cells,
+                            PercentSinglets=ttt$N_Singlets/ttt$N_Cells * 100)
+     }
+    return(result)
+  })
+  counter <<- 0
+  return(ttt2)
+})
+
+singlet_count <- vector("list",length(logtrans_doublet_percent))
+names(singlet_count) <- names(logtrans_doublet_percent)
+for(i in 1:length(logtrans_doublet_percent)){
+  dd <- data.frame()
+  for(j in 1:36){
+  dd <- rbind(dd,logtrans_doublet_percent[[i]][[j]])
+  }
+  dd$FileName <- pnames
+  singlet_count[[i]]  <- dd
+}
+rm(logtrans_doublet_percent)
+
+#putting the doublet stuffs together
+singlet_count_data <- data.frame()
+for( i in 1:length(singlet_count)){
+  singlet_count_data <- rbind(singlet_count_data,singlet_count[[i]])
+}
+rm(singlet_count)
+
+#time and computing number of doublets
+singlet_count_data$Time <- rep(1:7,each=36)
+singlet_count_data$NumberOfDoublets <- singlet_count_data$NumberOfCells - singlet_count_data$NumberOfSinglets
+singlet_count_data$Treatment <- sapply(singlet_count_data$FileName,
+                                      function(x)strsplit(x,"_")[[1]][3])
+singlet_count_data$Treatment[singlet_count_data$Treatment=="Control"] <- "0"
+singlet_count_data$Treatment <- factor(singlet_count_data$Treatment,
+                                      unique(singlet_count_data$Treatment)[6:1])
+singlet_count_data$Species <- sapply(singlet_count_data$FileName,
+                                      function(x)strsplit(x,"_")[[1]][2])
+singlet_count_data$Replicate <- sapply(singlet_count_data$FileName,
+                                      function(x)strsplit(x,"_")[[1]][4])
+
+#plotting
+singlet_count_data %>% ggplot(aes(Time,NumberOfDoublets/NumberOfCells,group=Treatment,
+                                 color=Treatment)) + geom_point(aes(size=NumberOfCells)) +
+  geom_line() + facet_grid(Replicate~Species) + theme_bw() + 
+  ggtitle("Doublet Proportion by Specie & Replicates")
+
+
+
+
+## reduced frame with debris filtered data
+counter2 <- 0
+counter <- 0
+logtrans_doublet_filtered <- lapply(logtrans_debris_filtered,function(x){
+  counter2 <<- counter2 + 1
+  ttt2 <- fsApply(x, function(y){
+      if(counter <= 18){
+        counter <<- counter + 1
+        ttt <- celldoublets(y,positions=c(F,F),type="manual",manualgatetype="ellipsoid",
+                            control=F,control_use=c(F,F))$reducedframe
+      } else if(counter > 18 & counter <= 36){
+        counter <<- counter + 1
+        ttt <- celldoublets(y,positions=c(F,F),type="manual",manualgatetype="ellipsoid",
+                            control=F,control_use=c(F,F))$reducedframe
+     }
+    return(ttt)
+  })
+  counter <<- 0
+  return(ttt2)
+})
+
+
+```
+
+
+
+
+### Densities
+
+```{r}
+debris_count_data$Dilution <- NULL
+#prelim
+debris_count_data$Dilution[debris_count_data$Time=="2017-03-28"] <- "5" #meta_files$PrelimMetaFile$DilutionFactor
+#Day 1
+debris_count_data$Dilution[debris_count_data$Time=="2017-03-31"] <- "5"
+#setting dilution for day 2
+#all others
+debris_count_data$Dilution[debris_count_data$Time=="2017-04-06"] <- "30"
+#treatment=50
+debris_count_data$Dilution[debris_count_data$Time=="2017-04-06" & 
+                           debris_count_data$Species=="5"&
+                           debris_count_data$Treatment==50] <- "150"
+#control treatment
+debris_count_data$Dilution[debris_count_data$Time=="2017-04-06" & 
+                           debris_count_data$Species=="5"&
+                           debris_count_data$Treatment=="0"] <- "150"
+
+#time = 3 and above
+for(i in 4:length(Time)){
+  debris_count_data$Dilution[debris_count_data$Time == Time[i]] <- as.character(Retained[[i-3]]$Dilution)
+}
+
+#if only dilution 2000 above was used from Time = 3
+#debris_count_data$Dilution[is.na(debris_count_data$Dilution)] <- "2000"
+
+debris_count_data$Dilution <- as.numeric((debris_count_data$Dilution))
+debris_count_data <- debris_count_data %>% mutate(CyanoAbundance = (CyanoCount / OParticleCount) * CPML * Dilution)
+
+#BS5 Day 7 for Rep 2 and 3 are not observed
+debris_count_data$CyanoAbundance[debris_count_data$Species=="5"&
+                                 debris_count_data$Treatment=="0"&
+                                 debris_count_data$Time=="2017-05-09"&
+                                 (debris_count_data$Replicate=="2"|
+                                  debris_count_data$Replicate=="3")] <- NA
+
+#deleting abundance for BS4 replicate 2 at time 7
+debris_count_data$CyanoAbundance[debris_count_data$Species=="4"&
+                                 debris_count_data$Treatment=="0"&
+                                 debris_count_data$Time=="2017-05-09"&
+                                 (debris_count_data$Replicate=="2")] <- NA
+
+#removing observations of time == 34
+#debris_count_data <- debris_count_data %>% dplyr::filter(Time != 34)
+#merging the abundance dataset and margin events dataset together
+logtrans_margin_dataset$Prelim$File <- good_measurements$Prelim$Filename
+logtrans_margin_dataset <- do.call(rbind.data.frame, logtrans_margin_dataset)
+debris_count_data <- cbind(debris_count_data, logtrans_margin_dataset)
+debris_count_data <- debris_count_data %>% dplyr::select(FileName, Species, Treatment, Dilution, 
+                                                         Time, Replicate, CPML, CyanoCount, 
+                                                         DebrisCount, 
+                                                         ParticleCount, 
+                                                         OtherCount = N_others, 
+                                                         MarginCount = nmargin, 
+                                                         FParticleCount = nparticle,
+                                                         OParticleCount, CyanoAbundance)
+  
+####Plotting growth curves  
+debris_count_data <- debris_count_data %>% dplyr::filter(is.na(Replicate)) %>% 
+  dplyr::bind_rows(.,.,.) %>% dplyr::mutate(Replicate = as.character(rep(1:3, each = 12)) ) %>% 
+  dplyr::bind_rows(., debris_count_data %>% dplyr::filter(!is.na(Replicate))) %>% 
+  dplyr::mutate(Time2 = rep(cumsum(c(1, diff(unique(debris_count_data$Time)))), each = 36))
+
+debris_count_data %>% 
+  ggplot(aes(x = Time2, y = log(OtherCount), group = Treatment,
+             color = Treatment)) + geom_point() + facet_grid(Replicate ~ Species) +
+  theme_minimal() +  ggtitle("Cyano Count by Specie and Replicate") +
+  geom_line() + labs(x = "Time (Days)")
+
+### lagging and creating needed inidicator variables
+debris_count_data <- debris_count_data %>% mutate(Ind = if_else(Species == "4", 1, 2))
+write.csv(debris_count_data, "Data/Abundance_Monoculture.csv", na = ".", row.names = F)
+
+#spreading in Jurg's format
+jurgsform <- data.table::dcast(data.table::setDT(debris_count_data),
+                                           Time + Treatment ~ Species + Replicate,
+                 value.var = "CyanoAbundance") %>% dplyr::mutate(Time2 = rep(1:8, each = 6))
+jurgsform$Treatment2 <- as.numeric(jurgsform$Treatment)
+jurgsform <- jurgsform %>% dplyr::arrange(., desc(Treatment2)) 
+write.csv(jurgsform, "Data/Jurg_Monoculture.csv", row.names = F)
+
+##################### Invasion Experiment ##################
+debris_count_invasion_data$Dilution <- rep(2000, 360)
+debris_count_invasion_data$Invader <- if_else(debris_count_invasion_data$Resident_Species == 4, 5, 4)
+#debris_count_invasion_data$Dilution[debris_count_invasion_data$Time != 41] <- 2000
+#debris_count_invasion_data$Dilution[debris_count_invasion_data$Time == 41] <- 2000
+#debris_count_invasion_data$Dilution[debris_count_invasion_data$Time == 41 &
+#                                    debris_count_invasion_data$Species=="5" &
+#                                    debris_count_invasion_data$Treatment=="400"] <- 100
+
+debris_count_invasion_data <- debris_count_invasion_data %>% mutate(BS4Abundance = (BS4Count/ParticleCount) * CPML * as.numeric(Dilution),
+ BS5Abundance = (BS5Count/ParticleCount) * CPML * as.numeric(Dilution),
+ Resident_Species = as.numeric(Resident_Species),
+ Replicate = as.numeric(Replicate))
+
+#plotting
+debris_count_invasion_data %>% ggplot(aes(x=Time)) + 
+  geom_point(aes(shape=Treatment,y=log(BS4Abundance),group=Treatment,color=Treatment)) +
+  geom_point(aes(shape=Treatment,y=log(BS5Abundance),group=Treatment,color=Treatment)) +
+  facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("BS4 Abundance (Invasion)") +
+  geom_line(aes(y=log(BS4Abundance),group=Treatment,color=Treatment),linetype="solid") +
+  geom_line(aes(y=log(BS5Abundance),group=Treatment,color=Treatment),linetype="dashed") 
+
+jurgsform_invasion <- data.table::dcast(data.table::setDT(debris_count_invasion_data),
+                                           Time + Treatment + Invader ~ Replicate,
+                 value.var = c("BS4Abundance", "BS5Abundance"))
+
+write.csv(jurgsform_invasion, "Data/Jurg_Invasion.csv", row.names = F)
+
+
+###Plotting both invasion and monoculture experiments together
+#####combining both datasets
+bs4_mono <- debris_count_data %>% select(FileName,Time,Treatment,Species,
+                                         Replicate,Dilution,CyanoAbundance,CyanoCount) %>% 
+            filter(Species==4) %>% rename(Resident_Species=Species,BS4Abundance=CyanoAbundance,
+                                          BS4Count=CyanoCount) %>%
+            mutate(BS5Abundance=rep(NA,126),BS5Count=rep(NA,126))
+bs5_mono <- debris_count_data %>% filter(Species==5)  %>%
+                                  select(FileName,Time,Treatment,Species,
+                                         Replicate, Dilution,CyanoAbundance,CyanoCount)  %>%
+  rename(Resident_Species=Species,BS5Abundance=CyanoAbundance,BS5Count=CyanoCount) %>%
+  mutate(BS4Abundance=rep(NA,126),BS4Count=rep(NA,126))
+binded_data_density <- bind_rows(bs4_mono,bs5_mono,debris_count_invasion_data %>%
+                           select(FileName,Time,Treatment,Resident_Species,
+                                         Replicate, Dilution,BS4Abundance,BS5Abundance,BS4Count,BS5Count))
+rm(bs4_mono,bs5_mono)
+par(mfcol=c(3,2),oma=c(6,3,1,0),mar=c(3,2,2,2))
+for(j in 1:2){
+  if(unique(binded_data_density$Resident_Species)[j]=="4"){
+    ys <- log(binded_data_density$BS4Abundance + 1)
+    y2 <- log(binded_data_density$BS5Abundance + 1)
+  }else   {ys <- log(binded_data_density$BS5Abundance + 1);y2<-log(binded_data_density$BS4Abundance + 1)}
+  
+  for(i in 1:3){
+    plot(x=binded_data_density$Time,
+     y=log(binded_data_density$BS4Abundance),
+     frame.plot=F,type="n",xlab="Time",ylab="",ylim=c(0,15),xlim=c(0,90)
+     ,main=ifelse(unique(binded_data_density$Resident_Species)[j]=="4",paste0("BS4,","Rep=",i),
+                  paste0("BS5,","Rep=",i))
+     )
+    #Bigger points for the monoculture part and thick lines for monoculture part
+    points(x=binded_data_density$Time[binded_data_density$Resident_Species==
+                                      unique(binded_data_density$Resident_Species)[j]&
+                                      binded_data_density$Replicate==
+                                      unique(binded_data_density$Replicate)[i] & 
+                                      binded_data_density$Time <= 40],
+    y=ys[binded_data_density$Resident_Species==unique(binded_data_density$Resident_Species)[j]&
+         binded_data_density$Replicate==unique(binded_data_density$Replicate)[i] &
+         binded_data_density$Time <= 40],
+    col=rainbow(6)[binded_data_density$Treatment[binded_data_density$Resident_Species==
+                                                 unique(binded_data_density$Resident_Species)[j]&
+                                                 binded_data_density$Replicate==
+                                                 unique(binded_data_density$Replicate)[i]] ],
+    pch=c(3,8,15:18)[binded_data_density$Treatment[binded_data_density$Resident_Species==
+                                                   unique(binded_data_density$Resident_Species)[j]&
+                                                   binded_data_density$Replicate==
+                                                   unique(binded_data_density$Replicate)[i] ]],
+    cex=2)
+    xvals <- split(binded_data_density$Time[binded_data_density$Resident_Species==
+                                        unique(binded_data_density$Resident_Species)[j]&
+                                        binded_data_density$Replicate==
+                                        unique(binded_data_density$Replicate)[i] & 
+                                        binded_data_density$Time <= 40],
+               binded_data_density$Treatment[binded_data_density$Resident_Species==
+                                             unique(binded_data_density$Resident_Species)[j]&
+                                             binded_data_density$Replicate==
+                                             unique(binded_data_density$Replicate)[i] & 
+                                             binded_data_density$Time <= 40])
+    yvals <- split(ys[binded_data_density$Resident_Species==
+                      unique(binded_data_density$Resident_Species)[j]&
+                      binded_data_density$Replicate==
+                      unique(binded_data_density$Replicate)[i] & 
+                      binded_data_density$Time <= 40],
+               binded_data_density$Treatment[binded_data_density$Resident_Species==
+                                             unique(binded_data_density$Resident_Species)[j]&
+                                             binded_data_density$Replicate==
+                                             unique(binded_data_density$Replicate)[i] & 
+                                             binded_data_density$Time <= 40])
+  mapply(lines,xvals,yvals,col=rainbow(6),lwd=2,lty=1)
+
+  ###smaller points and dashed lines for the time they were invaded forward
+  points(x=binded_data_density$Time[binded_data_density$Resident_Species==
+                                  unique(binded_data_density$Resident_Species)[j]&
+                                  binded_data_density$Replicate==
+                                  unique(binded_data_density$Replicate)[i] & 
+                                  binded_data_density$Time > 40],
+        y=ys[binded_data_density$Resident_Species==unique(binded_data_density$Resident_Species)[j]&
+             binded_data_density$Replicate==unique(binded_data_density$Replicate)[i] &
+                                            binded_data_density$Time > 40],
+        col=rainbow(6)[binded_data_density$Treatment[binded_data_density$Resident_Species==
+                                                 unique(binded_data_density$Resident_Species)[j]&
+                                                 binded_data_density$Replicate==
+                                                 unique(binded_data_density$Replicate)[i] ]],
+        pch=c(3,8,15:18)[binded_data_density$Treatment[binded_data_density$Resident_Species==
+                                                   unique(binded_data_density$Resident_Species)[j]&
+                                                   binded_data_density$Replicate==
+                                                   unique(binded_data_density$Replicate)[i]]],
+        cex=1.4)
+  xvals <- split(binded_data_density$Time[binded_data_density$Resident_Species==
+                                        unique(binded_data_density$Resident_Species)[j]&
+                                        binded_data_density$Replicate==
+                                        unique(binded_data_density$Replicate)[i] & 
+                                        binded_data_density$Time > 40],
+                binded_data_density$Treatment[binded_data_density$Resident_Species==
+                                             unique(binded_data_density$Resident_Species)[j]&
+                                             binded_data_density$Replicate=="1" & 
+                                             binded_data_density$Time > 40])
+  yvals <- split(ys[binded_data_density$Resident_Species==
+                                unique(binded_data_density$Resident_Species)[j]&
+                                                    binded_data_density$Replicate==
+                                                    unique(binded_data_density$Replicate)[i] & 
+                                                    binded_data_density$Time > 40],
+                binded_data_density$Treatment[binded_data_density$Resident_Species==
+                                             unique(binded_data_density$Resident_Species)[j]&
+                                             binded_data_density$Replicate==
+                                             unique(binded_data_density$Replicate)[i] & 
+                                  binded_data_density$Time > 40])
+  mapply(lines,xvals,yvals,col=rainbow(6),lwd=2,lty=2)
+
+  #invaders present in the invasion part
+  xvals <- split(binded_data_density$Time[binded_data_density$Resident_Species==
+                                        unique(binded_data_density$Resident_Species)[j]&
+                                        binded_data_density$Replicate==
+                                        unique(binded_data_density$Replicate)[i] & 
+                                        binded_data_density$Time > 40],
+                binded_data_density$Treatment[binded_data_density$Resident_Species==
+                                             unique(binded_data_density$Resident_Species)[j]&
+                                             binded_data_density$Replicate==
+                                             unique(binded_data_density$Replicate)[i] & 
+                                             binded_data_density$Time > 40])
+  yvals <- split(y2[binded_data_density$Resident_Species==
+                    unique(binded_data_density$Resident_Species)[j]&
+                    binded_data_density$Replicate==
+                    unique(binded_data_density$Replicate)[i] & 
+                     binded_data_density$Time > 40],
+                binded_data_density$Treatment[binded_data_density$Resident_Species==
+                                             unique(binded_data_density$Resident_Species)[j]&
+                                             binded_data_density$Replicate==
+                                             unique(binded_data_density$Replicate)[i] & 
+                                             binded_data_density$Time > 40])
+  mapply(lines,xvals,yvals,col=rainbow(6),lwd=1,lty=5)
+  }
+}
+
+#ylab
+mtext(text="log(CyanoAbundance)",side=2,line=1,outer=T)
+mtext(text="Time (Days)",side=1,line=0,outer=T)
+#legends
+legend(x=-70,y=-5.5,levels(binded_data_density$Treatment),pch=c(3,8,15:18),
+       col=rainbow(6),horiz=T,bty="n",xpd=NA)
+legend(x=-70,y=-3.5,c("Mono","Invader"),lty=c(1,2),lwd=c(2,1),bty="n",horiz=T,xpd=NA)
+
+binded_data_density %>% filter(Treatment %in% c("0","100","400")) %>% 
+  ggplot(aes(x=Time)) + facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("Evolution of Cyano Abundance") +
+  geom_line(aes(y=log(BS4Abundance),group=Treatment,colour=Treatment),linetype="solid") +  geom_line(aes(y=log(BS5Abundance),group=Treatment,colour=Treatment),linetype="dashed") +
+  scale_linetype_discrete(name="Specie",breaks=c("4","5"),labels=c("BS4","BS5")) + 
+  labs(x="Time (Days)",y="log(CyanoAbundance)") 
+
+```
+
+### Calculating TOP (Fontana's Approach)
+
+```{r}
+####Adding ratio of Area and Height to expression matrix to compute TOP
+clusterExport(cl,"TOP")
+TOPS_mono <- clusterApplyLB(cl,logtrans_debris_filtered[c(1,2,3,4,5,7)], function(x){
+   ttt <- fsApply(x,function(y){
+     tops <- TOP(cbind(exprs(y)[,c("FSC.HLin","RED.B.HLin","YEL.B.HLin","GRN.B.HLin")]),
+                 exprs(y)[,"SSC.ALin"]/exprs(y)[,"SSC.HLin"])$TA
+   })
+  return(ttt)
+ })
+
+#putting stuffs together
+TOPS_monoculture <- data.frame()
+for( i in 1:length(TOPS_mono)){
+  TOPS_monoculture <- rbind(TOPS_monoculture,TOPS_mono[[i]])
+}
+TOPS_monoculture$Time <- debris_count_data$Time
+TOPS_monoculture$Treatment <- debris_count_data$Treatment
+TOPS_monoculture$Species <- debris_count_data$Species
+TOPS_monoculture$Replicate <- debris_count_data$Replicate
+TOPS_monoculture$Abundance <- debris_count_data$CyanoAbundance
+names(TOPS_monoculture)[1] <- c("TOPS")
+
+#######removing the observations related to time==40 for BS5 control, replicate 2 and 3
+TOPS_monoculture[(TOPS_monoculture$Time == 40 & TOPS_monoculture$Species == "5" & 
+                   TOPS_monoculture$Replicate %in% c("2","3") & TOPS_monoculture$Treatment == "0"),"TOPS"] <- NA
+
+####removing replicate 2, BS4 time==40
+TOPS_monoculture[(TOPS_monoculture$Time == 40 & TOPS_monoculture$Species == "4" & 
+                   TOPS_monoculture$Replicate =="2" & TOPS_monoculture$Treatment == "0"),"TOPS"] <- NA
+
+#plotting
+TOPS_monoculture %>% ggplot(aes(x=Time,y=log(TOPS),group=Treatment,color=Treatment)) + geom_point(aes(shape=Treatment)) +
+   theme_bw() + ggtitle("Monoculture TOPS") +
+  geom_line() + facet_grid(Replicate~Species)
+
+#TOPS_monoculture <- TOPS_monoculture %>% group_by(Treatment,Replicate,Species) %>% 
+#                    dplyr::mutate(TOPS_1=lag(TOPS,k=1))
+#TOPS_monoculture <- TOPS_monoculture %>% group_by(Treatment,Replicate,Species) %>%      
+#                                mutate(Abundance_1=lag(Abundance,k=1))
+#TOPS_monoculture <- TOPS_monoculture %>% mutate(T1=ifelse(Treatment=="400",1,0),
+#                                                T2=ifelse(Treatment=="200",1,0),
+#                                                T3=ifelse(Treatment=="100",1,0),
+#                                                T4=ifelse(Treatment=="50",1,0),
+#                                                T5=ifelse(Treatment=="25",1,0),
+#                                                SE=ifelse(Species=="4",1,0)) 
+#names(TOPS_monoculture)[4] <- "Resident_Species"
+#TOPS_monoculture$Invader <- rep(0,216)
+#write_csv(TOPS_monoculture,"TOPS_monoculture.csv",na=".")
+#Wide version of TOP_Monoculture
+
+Monoculture_data_wide <- data.table::dcast(data.table::setDT(TOPS_monoculture),
+                                           Time+Treatment+Replicate~Species,
+                 value.name=c("BS4TOPS","BS5TOPS"),value.var=c("TOPS","Abundance")) %>%
+  group_by(Treatment,Replicate) %>%dplyr::mutate(TOPS_4_1=lag(TOPS_4,k=1),
+                                                 TOPS_5_1=lag(TOPS_5,k=1),
+                                                 Abundance_4_1=lag(Abundance_4,k=1),
+                                                 Abundance_5_1=lag(Abundance_5,k=1))
+Monoculture_data_wide$Treatment <- as.numeric(Monoculture_data_wide$Treatment)
+#Monoculture_data_wide$SampID <- rep(1:18,times=6)
+write_csv(Monoculture_data_wide,"Data/Monoculture_data_wide.csv",na=".")
+
+####long format of the data
+Monoculture_data_long <- data.table::melt(data.table::setDT(Monoculture_data_wide),id.vars=c(1:3,8:11),
+                         measure.vars=c(4,6,5,7),value.name="Resp",
+                         variable.name="Ind",variable.factor=F)
+
+Monoculture_data_long$Resp2 <- NULL
+Monoculture_data_long$Resp2[startsWith(Monoculture_data_long$Ind,"TOPS")] <- log(Monoculture_data_long$Resp[startsWith(Monoculture_data_long$Ind,"TOPS")]+1)
+
+Monoculture_data_long$Resp2[startsWith(Monoculture_data_long$Ind,"Abundance")] <- log(Monoculture_data_long$Resp[startsWith(Monoculture_data_long$Ind,"Abundance")])
+
+Monoculture_data_long$Ind2 <- sapply(Monoculture_data_long$Ind,function(x){
+  switch(x,TOPS_4=1,Abundance_4=2,TOPS_5=3,Abundance_5=4)
+})
+Monoculture_data_long <- Monoculture_data_long[order(Monoculture_data_long$Time),]
+Monoculture_data_long$SampID <- rep(c(rep(1:18,times=2),rep(19:36,times=2)),6)
+Monoculture_data_long <- Monoculture_data_long[order(Monoculture_data_long$Time,
+                                                     Monoculture_data_long$SampID,
+                                                     Monoculture_data_long$Ind),]
+
+write_csv(Monoculture_data_long,"Monoculture_data_long.csv",na=".")
+
+########################  TOP calculation for Invasion  #########################
+TOPS_inv <- clusterApplyLB(cl,logtrans_debris_filtered_invasion, function(x){
+   ttt <- fsApply(x,function(y){
+     yy <- exprs(y)[,c("FSC.HLin","RED.B.HLin","YEL.B.HLin","GRN.B.HLin","SSC.ALin","SSC.HLin",
+                       "BS4BS5.Indicator")]
+     yy_bs4 <- yy[yy[,"BS4BS5.Indicator"]==1,]
+     yy_bs5 <- yy[yy[,"BS4BS5.Indicator"]==0,]
+     tops <- c(BS4=TOP(yy_bs4[,c(1:6)])$TA,
+               BS5=TOP(yy_bs5[,c(1:6)])$TA)
+   })
+  return(ttt)
+})
+
+#putting the TOPS stuffs together
+TOPS_invasion <- data.frame()
+for( i in 1:length(TOPS_inv)){
+  TOPS_invasion <- rbind(TOPS_invasion,TOPS_inv[[i]])
+}
+
+TOPS_invasion$Time <- debris_count_invasion_data$Time
+TOPS_invasion$Treatment <- debris_count_invasion_data$Treatment
+TOPS_invasion$Resident_Species <- debris_count_invasion_data$Resident_Species
+TOPS_invasion$Replicate <- debris_count_invasion_data$Replicate
+names(TOPS_invasion)[1:2] <- c("TOP_BS4","TOP_BS5")
+#adding abundance of BS4 and BS5
+TOPS_invasion$BS4Abundance <- debris_count_invasion_data$BS4Abundance
+TOPS_invasion$BS5Abundance <- debris_count_invasion_data$BS5Abundance
+
+###plotting the invasion part
+TOPS_invasion %>% ggplot(aes(x=Time)) + 
+  geom_point(aes(shape=Treatment,y=log(TOP_BS4+1),group=Treatment,color=Treatment)) +
+  geom_point(aes(shape=Treatment,y=log(TOP_BS5+1),group=Treatment,color=Treatment)) +
+  facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("BS4/BS5 TOP (Invasion)") +
+  geom_line(aes(y=log(TOP_BS4+1),group=Treatment,color=Treatment),linetype="solid") +
+  geom_line(aes(y=log(TOP_BS5+1),group=Treatment,color=Treatment),linetype="dashed")
+
+###This is only to be run for modelling purposes
+#TOPS_invasionM <- data.table::melt(data.table::setDT(TOPS_invasion),id.vars=3:6,
+#                                  measure.vars=list(1:2,7:8),
+#                 value.name=c("TOPS","Abundance"),variable.name="Spp")
+#TOPS_invasion$BS4Abundance <- debris_count_invasion_data$BS4Abundance
+#TOPS_invasion$BS5Abundance <- debris_count_invasion_data$BS5Abundance
+
+#TOPS_invasionM <- TOPS_invasionM %>% mutate(SER4=ifelse(Resident_Species==4&Spp==1,1,0))%>%  
+#                  mutate(SEI5=ifelse(Resident_Species==4&Spp==2,1,0),
+#                         SEI4=ifelse(Resident_Species==5&Spp==1,1,0),
+#                         SER5=ifelse(Resident_Species==5&Spp==2,1,0),
+#                         Invader=ifelse((Resident_Species==4&Spp==2)|
+#                                  (Resident_Species==5&Spp==1),1,0),
+#                         SE=ifelse(Resident_Species==4,1,0))
+
+#TOPS_invasionM2 <- TOPS_invasion %>% gather("TOPSpecie","TOPS",TOP_BS4,TOP_BS5)
+#TOPS_invasionM3 <- TOPS_invasionM2 %>% gather("Abundance","ABID",BS4Abundance,BS5Abundance)
+###
+
+Invasion_data_wide <- TOPS_invasion %>% group_by(Treatment,Replicate,Resident_Species) %>% 
+                      dplyr::mutate(TOPS_4_1=lag(TOP_BS4,k=1), 
+                                  Abundance_4_1=lag(BS4Abundance,k=1),
+                                  TOPS_5_1=lag(TOP_BS5,k=1),
+                                  Abundance_5_1=lag(BS5Abundance,k=1))
+
+Invasion_data_wide$Treatment <- as.numeric(as.character(Invasion_data_wide$Treatment))
+write_csv(Invasion_data_wide,"Invasion_data_wide.csv",na=".")
+
+###########Invaion long
+Invasion_data_long <- data.table::melt(data.table::setDT(Invasion_data_wide),id.vars=c(3:6,9:12),
+                 measure.vars=c(1,7,2,8),
+                 value.name="Resp",variable.name="Ind",variable.factor=F)
+Invasion_data_long$Resp2 <- NULL
+Invasion_data_long$Resp2[startsWith(Invasion_data_long$Ind,"TOP")] <- log(Invasion_data_long$Resp[startsWith(Invasion_data_long$Ind,"TOP")]+1)
+
+Invasion_data_long$Resp2[startsWith(Invasion_data_long$Ind,"BS")] <- log(Invasion_data_long$Resp[startsWith(Invasion_data_long$Ind,"BS")])
+
+Invasion_data_long$Ind2 <- sapply(Invasion_data_long$Ind,function(x){
+  switch(x,TOP_BS4=1,BS4Abundance=2,TOP_BS5=3,BS5Abundance=4)
+})
+Invasion_data_long$SampID <- rep(1:360,times=4)
+
+write_csv(Invasion_data_long,"Invasion_data_long.csv",na=".")
+
+##########combining the monoculture and invasion data together
+#TOPS_monoculture$Resident_Species <- as.numeric(TOPS_monoculture$Resident_Species)
+#TOPS_monoculture$Replicate <- as.numeric(TOPS_monoculture$Replicate)
+#TOPS_combined <- rbind(TOPS_monoculture[,c("TOPS","Abundance","Time", "Treatment",
+#                             "Resident_Species","SE","Invader","Replicate")],
+#          TOPS_invasionM2[,c("TOPS","Abundance","Time", "Treatment",
+#                             "Resident_Species","SE","Invader","Replicate")])
+
+#TOPS_combined2 <- TOPS_combined %>% mutate(Tsp=ifelse(Time <= 40,0,1)) 
+#TOPS_combined2 <- TOPS_combined2[order(TOPS_combined2$Time),]
+#TOPS_combined2$TOPS_1 <- dplyr::lag(TOPS_combined2$TOPS,36)
+#TOPS_combined2$Abundance_1 <- dplyr::lag(TOPS_combined2$Abundance,36)
+#write_csv(TOPS_combined2,"TOPS_combined.csv",na=".")
+
+#####combining both TOPS
+#bs4_top_mono <- TOPS_monoculture %>% select(Time,Treatment,Species,
+#                                         Replicate,TOPS) %>% 
+#            filter(Species==4) %>% rename(Resident_Species=Species,TOP_BS4=TOPS) %>%
+#            mutate(TOP_BS5=rep(NA,126))
+#bs5_top_mono <- TOPS_monoculture %>% filter(Species==5) %>% mutate(TOP_BS4=rep(NA,126)) %>%
+#                                  select(Time,Treatment,Species,
+#                                         Replicate,TOP_BS4,TOPS)  %>%  
+#                                  rename(Resident_Species=Species,TOP_BS5=TOPS)
+#binded_data_TOP <- bind_rows(bs4_top_mono,bs5_top_mono,TOPS_invasion %>%
+#                           select(Time,Treatment,Resident_Species,
+#                                         Replicate,TOP_BS4,TOP_BS5))
+#rm(bs4_top_mono,bs5_top_mono)
+
+####plotting
+#par(mfcol=c(3,2),oma=c(6,3,1,0),mar=c(3,2,2,2))
+#for(j in 1:2){
+  if(unique(binded_data_TOP$Resident_Species)[j]=="4"){
+    ys <- log(binded_data_TOP$TOP_BS4+1)
+    y2 <- log(binded_data_TOP$TOP_BS5+1)
+  }else   {ys <- log(binded_data_TOP$TOP_BS5 + 1); y2<-log(binded_data_TOP$TOP_BS4 + 1)}
+  
+  for(i in 1:3){
+    plot(x=binded_data_TOP$Time,
+     y=ys,
+     frame.plot=F,type="n",xlab="Time",ylab="",ylim=c(0,15),xlim=c(0,90)
+     ,main=ifelse(unique(binded_data_TOP$Resident_Species)[j]=="4",paste0("TOP_BS4,","Rep=",i),
+                  paste0("TOP_BS5,","Rep=",i))
+     )
+    #Bigger points for the monoculture part and thick lines for monoculture part
+    points(x=binded_data_TOP$Time[binded_data_TOP$Resident_Species==
+                                      unique(binded_data_TOP$Resident_Species)[j]&
+                                      binded_data_TOP$Replicate==
+                                      unique(binded_data_TOP$Replicate)[i] & 
+                                      binded_data_TOP$Time <= 40],
+    y=ys[binded_data_TOP$Resident_Species==unique(binded_data_TOP$Resident_Species)[j]&
+         binded_data_TOP$Replicate==unique(binded_data_TOP$Replicate)[i] &
+         binded_data_TOP$Time <= 40],
+    col=rainbow(6)[binded_data_TOP$Treatment[binded_data_TOP$Resident_Species==
+                                                 unique(binded_data_TOP$Resident_Species)[j]&
+                                                 binded_data_TOP$Replicate==
+                                                 unique(binded_data_TOP$Replicate)[i]] ],
+    pch=c(3,8,15:18)[binded_data_TOP$Treatment[binded_data_TOP$Resident_Species==
+                                                   unique(binded_data_TOP$Resident_Species)[j]&
+                                                   binded_data_TOP$Replicate==
+                                                   unique(binded_data_TOP$Replicate)[i] ]],
+    cex=2)
+    xvals <- split(binded_data_TOP$Time[binded_data_TOP$Resident_Species==
+                                        unique(binded_data_TOP$Resident_Species)[j]&
+                                        binded_data_TOP$Replicate==
+                                        unique(binded_data_TOP$Replicate)[i] & 
+                                        binded_data_TOP$Time <= 40],
+               binded_data_TOP$Treatment[binded_data_TOP$Resident_Species==
+                                             unique(binded_data_TOP$Resident_Species)[j]&
+                                             binded_data_TOP$Replicate==
+                                             unique(binded_data_TOP$Replicate)[i] & 
+                                             binded_data_TOP$Time <= 40])
+    yvals <- split(ys[binded_data_TOP$Resident_Species==
+                      unique(binded_data_TOP$Resident_Species)[j]&
+                      binded_data_TOP$Replicate==
+                      unique(binded_data_TOP$Replicate)[i] & 
+                      binded_data_TOP$Time <= 40],
+               binded_data_TOP$Treatment[binded_data_TOP$Resident_Species==
+                                             unique(binded_data_TOP$Resident_Species)[j]&
+                                             binded_data_TOP$Replicate==
+                                             unique(binded_data_TOP$Replicate)[i] & 
+                                             binded_data_TOP$Time <= 40])
+  mapply(lines,xvals,yvals,col=rainbow(6),lwd=2,lty=1)
+
+  ###smaller points and dashed lines for the time they were invaded forward
+  points(x=binded_data_TOP$Time[binded_data_TOP$Resident_Species==
+                                  unique(binded_data_TOP$Resident_Species)[j]&
+                                  binded_data_TOP$Replicate==
+                                  unique(binded_data_TOP$Replicate)[i] & 
+                                  binded_data_TOP$Time > 40],
+        y=ys[binded_data_TOP$Resident_Species==unique(binded_data_TOP$Resident_Species)[j]&
+             binded_data_TOP$Replicate==unique(binded_data_TOP$Replicate)[i] &
+                                            binded_data_TOP$Time > 40],
+        col=rainbow(6)[binded_data_TOP$Treatment[binded_data_TOP$Resident_Species==
+                                                 unique(binded_data_TOP$Resident_Species)[j]&
+                                                 binded_data_TOP$Replicate==
+                                                 unique(binded_data_TOP$Replicate)[i] ]],
+        pch=c(3,8,15:18)[binded_data_TOP$Treatment[binded_data_TOP$Resident_Species==
+                                                   unique(binded_data_TOP$Resident_Species)[j]&
+                                                   binded_data_TOP$Replicate==
+                                                   unique(binded_data_TOP$Replicate)[i]]],
+        cex=1.4)
+  xvals <- split(binded_data_TOP$Time[binded_data_TOP$Resident_Species==
+                                        unique(binded_data_TOP$Resident_Species)[j]&
+                                        binded_data_TOP$Replicate==
+                                        unique(binded_data_TOP$Replicate)[i] & 
+                                        binded_data_TOP$Time > 40],
+                binded_data_TOP$Treatment[binded_data_TOP$Resident_Species==
+                                             unique(binded_data_TOP$Resident_Species)[j]&
+                                             binded_data_TOP$Replicate=="1" & 
+                                             binded_data_TOP$Time > 40])
+  yvals <- split(ys[binded_data_TOP$Resident_Species==
+                                unique(binded_data_TOP$Resident_Species)[j]&
+                                                    binded_data_TOP$Replicate==
+                                                    unique(binded_data_TOP$Replicate)[i] & 
+                                                    binded_data_TOP$Time > 40],
+                binded_data_TOP$Treatment[binded_data_TOP$Resident_Species==
+                                             unique(binded_data_TOP$Resident_Species)[j]&
+                                             binded_data_TOP$Replicate==
+                                             unique(binded_data_TOP$Replicate)[i] & 
+                                  binded_data_TOP$Time > 40])
+  mapply(lines,xvals,yvals,col=rainbow(6),lwd=2,lty=2)
+
+  #invaders present in the invasion part
+  xvals <- split(binded_data_TOP$Time[binded_data_TOP$Resident_Species==
+                                        unique(binded_data_TOP$Resident_Species)[j]&
+                                        binded_data_TOP$Replicate==
+                                        unique(binded_data_TOP$Replicate)[i] & 
+                                        binded_data_TOP$Time > 40],
+                binded_data_TOP$Treatment[binded_data_TOP$Resident_Species==
+                                             unique(binded_data_TOP$Resident_Species)[j]&
+                                             binded_data_TOP$Replicate==
+                                             unique(binded_data_TOP$Replicate)[i] & 
+                                             binded_data_TOP$Time > 40])
+  yvals <- split(y2[binded_data_TOP$Resident_Species==
+                    unique(binded_data_TOP$Resident_Species)[j]&
+                    binded_data_TOP$Replicate==
+                    unique(binded_data_TOP$Replicate)[i] & 
+                     binded_data_TOP$Time > 40],
+                binded_data_TOP$Treatment[binded_data_TOP$Resident_Species==
+                                             unique(binded_data_TOP$Resident_Species)[j]&
+                                             binded_data_TOP$Replicate==
+                                             unique(binded_data_TOP$Replicate)[i] & 
+                                             binded_data_TOP$Time > 40])
+  mapply(lines,xvals,yvals,col=rainbow(6),lwd=1,lty=5)
+  }
+#}
+
+#ylab
+#mtext(text="log(TOP+ 1)",side=2,line=1,outer=T)
+#mtext(text="Time (Days)",side=1,line=0,outer=T)
+#legends
+#legend(x=-70,y=-5.5,levels(binded_data_TOP$Treatment),pch=c(3,8,15:18),
+#       col=rainbow(6),horiz=T,bty="n",xpd=NA)
+#legend(x=-70,y=-3.5,c("Mono","Invader"),lty=c(1,2),lwd=c(2,1),bty="n",horiz=T,xpd=NA)
+
+####BS4s in both monoculture and those introduced to BS5s
+#binded_data_TOP %>% filter(Treatment %in% c("0","100","400")) %>%  ggplot(aes(x=Time)) + 
+#  geom_line(aes(x=Time,y=log(TOP_BS4),group=Treatment,colour=Treatment),linetype="solid") + 
+#  geom_line(aes(x=Time,y=log(TOP_BS5),group=Treatment,colour=Treatment),linetype="dashed")+
+#  facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("TOP Evolution") + labs(x="Time(Days)",y="log(TOP)")
+
+###
+#binded_data_TOP %>% ggplot(aes(x=Time,y=log(TOP_BS5+1),colour=Treatment,group=Treatment)) + 
+#  geom_line(aes(x=Time,y=log(TOP_BS5+1),group=Treatment,colour=Treatment),linetype=1) + 
+#  geom_point(aes(shape=Treatment)) + facet_grid(Replicate~Resident_Species) + theme_bw() + geom_vline(xintercept=40) + 
+#  geom_text(aes(x=71,y=12,label="Invasion")) + ggtitle("BS5 Tops")
+```
+
+### Calculating TED (Marc & Fontana's Approach)
+####  Marc's TED Test Functions
+
+```{r}
+#### function to test for multivariate uniformity based on distributional properties of interpoint
+### distances as discussed in Yang and Modarres
+#type and data_matrix must be supplied 
+#it is assumed that each column is a trait
+#package requires distances package
+multivariate_uniformity <- function(data_matrix){
+  #dimension of the data set
+  d <- dim(data_matrix)[2]
+  n <- dim(data_matrix)[1]
+  
+  #rescaling back to [0,1]
+  data_matrix_rescale <- matrix(NA,nrow=n,ncol=d)
+  for(i in 1:d){
+    mn <- min(data_matrix[,i]);mx <- max(data_matrix[,i])
+    a <- (n/(n-1)) * (mn - mx/n)
+    b <- (n/(n-1)) * (mx - mn/n)
+    data_matrix_rescale[,i] <- (data_matrix[,i] - a)/(b - a) 
+  }
+  
+  #computing squared euclidean distances
+  l2_norm <- as.matrix(distances::distances(data_matrix_rescale))^2
+  l2_norm <- l2_norm[upper.tri(l2_norm,diag = F)]
+  
+  
+  ##Q1
+  d_bar <- mean(l2_norm)
+  v_d_bar <- (d*(2*n + 3)) / (90*n*(n-1))
+    q1 <- ((d_bar - d/6)^2) / v_d_bar
+    
+    ##Q2
+    s_bar <- mean((l2_norm - d/6)^2)
+    if(d == 2){
+      v_s_bar <- (1/length(l2_norm)) * ( (1/56700) * (989 + 202*(n - 2)) )
+    }else if(d == 3){
+      v_s_bar <- (1/length(l2_norm)) * ( (1/1050) * (37 + 6*(n - 2)) )
+    }else if(d >= 4){
+      v_s_bar <- (1/length(l2_norm)) * ( ((49*d^2) / 16200)  + (101*d/37800) + 
+                                           (2*(n - 2)*( ((d^2)/16200) + (29*d/37800)) ) )  
+    }
+    
+    q2 <- ((s_bar - (7*d/180))^2) / v_s_bar
+    
+    ##Q3
+    q3 <- q1+q2
+    return(list(Q1=c(dbar=d_bar,vdbar=v_d_bar,Q1=q1,p_val=pchisq(q1,1,lower.tail=F)), Q2=c(sbar=s_bar,vsbar=v_s_bar,Q2=q2,p_val=pchisq(q2,1,lower.tail=F)),
+                 Q3=c(Q3=q3,p_val=pchisq(q3,2,lower.tail=F)) ))
+}
+
+########### TED as defined by Simone (with modifications)
+
+binning <- function(d_vec){
+  if(length(d_vec) <= 10){
+    Hmisc::cut2(d_vec,m=3,onlycuts = T)
+  }else{
+    k <- log2()
+    cut(d_vec,breaks=quantile(d_vec,prob=c() ),right=F)
+  } 
+    
+}
+
+###uniformly distributed matrix
+set.seed(1234)
+b_matrix <- matrix(ncol=5,nrow=1000)
+for(i in 1:5){
+  b_matrix[,i] <- runif(nrow(b_matrix),0,1)
+}
+
+############### TED for Monocultures
+TED_mono <- mclapply(logtrans_debris_filtered,function(x){
+  ttt <- fsApply(x,function(y){
+    yy <- rescale(exprs(y)[,c("FSC.HLin","RED.B.HLin","YEL.B.HLin","GRN.B.HLin",
+                             "SSC.ALin","SSC.HLin")])
+    return(TED(x=yy,base_traitmatrix=b_matrix))
+  })
+  return(ttt)
+})
+
+#putting stuffs together
+TEDS_monoculture <- data.frame()
+for( i in 1:length(TED_mono)){
+  TEDS_monoculture <- rbind(TEDS_monoculture,as.matrix(TED_mono[[i]]))
+}
+TEDS_monoculture$Time <- debris_count_data$Time
+TEDS_monoculture$Treatment <- debris_count_data$Treatment
+TEDS_monoculture$Species <- debris_count_data$Species
+TEDS_monoculture$Replicate <- debris_count_data$Replicate
+names(TEDS_monoculture)[1] <- c("TED")
+
+#plotting
+#TEDS_monoculture %>% ggplot(aes(x=Time,y=TED,group=Treatment,color=Treatment)) + geom_point(aes(shape=Treatment)) +
+#   theme_bw() + ggtitle("Monoculture TED") +
+#  geom_line() + facet_grid(Replicate~Species)
+
+########################  TED calculation for Invasion  #########################
+TED_inv <- lapply(logtrans_debris_filtered_invasion, function(x){
+   ttt <- fsApply(x,function(y){
+     yy <- exprs(y)[,c("FSC.HLin","RED.B.HLin","YEL.B.HLin","GRN.B.HLin","SSC.ALin","SSC.HLin",
+                       "BS4BS5.Indicator")]
+     yy_bs4 <- rescale(yy[yy[,"BS4BS5.Indicator"]==1,])
+     yy_bs5 <- rescale(yy[yy[,"BS4BS5.Indicator"]==0,])
+     teds <- c(BS4=TED(x=yy_bs4[,c(1:6)],base_traitmatrix=b_matrix),
+               BS5=TED(x=yy_bs5[,c(1:6)],base_traitmatrix=b_matrix))
+   })
+  return(ttt)
+})
+
+TED_invasion <- read_csv("ted_results_femi.csv") #data.frame()
+for( i in 1:length(TED_inv)){
+  TED_invasion <- rbind(TED_invasion,TED_inv[[i]])
+}
+
+TED_invasion$Time <- debris_count_invasion_data$Time
+TED_invasion$Treatment <- debris_count_invasion_data$Treatment
+TED_invasion$Resident_Species <- debris_count_invasion_data$Resident_Species
+TED_invasion$Replicate <- debris_count_invasion_data$Replicate
+names(TED_invasion)[1:2] <- c("TED_BS4","TED_BS5")
+
+
+#plotting
+#TED_invasion %>% ggplot(aes(x=Time,y=TED_BS4,group=Treatment,color=Treatment)) + geom_point(aes(shape=Treatment)) + theme_bw() + ggtitle("TED for BS4") +
+#  geom_line() + facet_grid(Replicate~Resident_Species)
+
+#####combining both TEDS
+bs4_ted_mono <- TEDS_monoculture %>% select(Time,Treatment,Species,
+                                         Replicate,TED) %>% 
+            filter(Species==4) %>% rename(Resident_Species=Species,TED_BS4=TED) %>%
+            mutate(TED_BS5=rep(NA,126))
+bs5_ted_mono <- TEDS_monoculture %>% filter(Species==5) %>% mutate(TED_BS4=rep(NA,126)) %>%
+                                  select(Time,Treatment,Species,
+                                         Replicate,TED_BS4,TED)  %>%  
+                                  rename(Resident_Species=Species,TED_BS5=TED)
+binded_data_TED <- bind_rows(bs4_ted_mono,bs5_ted_mono,TED_invasion %>%
+                           select(Time,Treatment,Resident_Species,
+                                         Replicate,TED_BS4,TED_BS5))
+rm(bs4_ted_mono,bs5_ted_mono)
+
+#############plotting together
+par(mfcol=c(3,2),oma=c(6,3,1,0),mar=c(3,2,2,2))
+for(j in 1:2){
+  if(unique(binded_data_TED$Resident_Species)[j]=="4"){
+    ys <- log(binded_data_TED$TED_BS4 + 1)
+    y2 <- log(binded_data_TED$TED_BS5 + 1)
+  }else   {ys <- log(binded_data_TED$TED_BS5 + 1);y2<-log(binded_data_TED$TED_BS4 + 1)}
+  
+  for(i in 1:3){
+    plot(x=binded_data_TED$Time,
+     y=ys,
+     frame.plot=F,type="n",xlab="Time",ylab="",ylim=c(0,1),xlim=c(0,90)
+     ,main=ifelse(unique(binded_data_TED$Resident_Species)[j]=="4",paste0("BS4,","Rep=",i),
+                  paste0("BS5,","Rep=",i))
+     )
+    #Bigger points for the monoculture part and thick lines for monoculture part
+    points(x=binded_data_TED$Time[binded_data_TED$Resident_Species==
+                                      unique(binded_data_TED$Resident_Species)[j]&
+                                      binded_data_TED$Replicate==
+                                      unique(binded_data_TED$Replicate)[i] & 
+                                      binded_data_TED$Time <= 40],
+    y=ys[binded_data_TED$Resident_Species==unique(binded_data_TED$Resident_Species)[j]&
+         binded_data_TED$Replicate==unique(binded_data_TED$Replicate)[i] &
+         binded_data_TED$Time <= 40],
+    col=rainbow(6)[binded_data_TED$Treatment[binded_data_TED$Resident_Species==
+                                                 unique(binded_data_TED$Resident_Species)[j]&
+                                                 binded_data_TED$Replicate==
+                                                 unique(binded_data_TED$Replicate)[i]] ],
+    pch=c(3,8,15:18)[binded_data_TED$Treatment[binded_data_TED$Resident_Species==
+                                                   unique(binded_data_TED$Resident_Species)[j]&
+                                                   binded_data_TED$Replicate==
+                                                   unique(binded_data_TED$Replicate)[i] ]],
+    cex=2)
+    xvals <- split(binded_data_TED$Time[binded_data_TED$Resident_Species==
+                                        unique(binded_data_TED$Resident_Species)[j]&
+                                        binded_data_TED$Replicate==
+                                        unique(binded_data_TED$Replicate)[i] & 
+                                        binded_data_TED$Time <= 40],
+               binded_data_TED$Treatment[binded_data_TED$Resident_Species==
+                                             unique(binded_data_TED$Resident_Species)[j]&
+                                             binded_data_TED$Replicate==
+                                             unique(binded_data_TED$Replicate)[i] & 
+                                             binded_data_TED$Time <= 40])
+    yvals <- split(ys[binded_data_TED$Resident_Species==
+                      unique(binded_data_TED$Resident_Species)[j]&
+                      binded_data_TED$Replicate==
+                      unique(binded_data_TED$Replicate)[i] & 
+                      binded_data_TED$Time <= 40],
+               binded_data_TED$Treatment[binded_data_TED$Resident_Species==
+                                             unique(binded_data_TED$Resident_Species)[j]&
+                                             binded_data_TED$Replicate==
+                                             unique(binded_data_TED$Replicate)[i] & 
+                                             binded_data_TED$Time <= 40])
+  mapply(lines,xvals,yvals,col=rainbow(6),lwd=2,lty=1)
+
+  ###smaller points and dashed lines for the time they were invaded forward
+  points(x=binded_data_TED$Time[binded_data_TED$Resident_Species==
+                                  unique(binded_data_TED$Resident_Species)[j]&
+                                  binded_data_TED$Replicate==
+                                  unique(binded_data_TED$Replicate)[i] & 
+                                  binded_data_TED$Time > 40],
+        y=ys[binded_data_TED$Resident_Species==unique(binded_data_TED$Resident_Species)[j]&
+             binded_data_TED$Replicate==unique(binded_data_TED$Replicate)[i] &
+                                            binded_data_TED$Time > 40],
+        col=rainbow(6)[binded_data_TED$Treatment[binded_data_TED$Resident_Species==
+                                                 unique(binded_data_TED$Resident_Species)[j]&
+                                                 binded_data_TED$Replicate==
+                                                 unique(binded_data_TED$Replicate)[i] ]],
+        pch=c(3,8,15:18)[binded_data_TED$Treatment[binded_data_TED$Resident_Species==
+                                                   unique(binded_data_TED$Resident_Species)[j]&
+                                                   binded_data_TED$Replicate==
+                                                   unique(binded_data_TED$Replicate)[i]]],
+        cex=1.4)
+  xvals <- split(binded_data_TED$Time[binded_data_TED$Resident_Species==
+                                        unique(binded_data_TED$Resident_Species)[j]&
+                                        binded_data_TED$Replicate==
+                                        unique(binded_data_TED$Replicate)[i] & 
+                                        binded_data_TED$Time > 40],
+                binded_data_TED$Treatment[binded_data_TED$Resident_Species==
+                                             unique(binded_data_TED$Resident_Species)[j]&
+                                             binded_data_TED$Replicate=="1" & 
+                                             binded_data_TED$Time > 40])
+  yvals <- split(ys[binded_data_TED$Resident_Species==
+                                unique(binded_data_TED$Resident_Species)[j]&
+                                                    binded_data_TED$Replicate==
+                                                    unique(binded_data_TED$Replicate)[i] & 
+                                                    binded_data_TED$Time > 40],
+                binded_data_TED$Treatment[binded_data_TED$Resident_Species==
+                                             unique(binded_data_TED$Resident_Species)[j]&
+                                             binded_data_TED$Replicate==
+                                             unique(binded_data_TED$Replicate)[i] & 
+                                  binded_data_TED$Time > 40])
+  mapply(lines,xvals,yvals,col=rainbow(6),lwd=2,lty=2)
+
+  #invaders present in the invasion part
+  xvals <- split(binded_data_TED$Time[binded_data_TED$Resident_Species==
+                                        unique(binded_data_TED$Resident_Species)[j]&
+                                        binded_data_TED$Replicate==
+                                        unique(binded_data_TED$Replicate)[i] & 
+                                        binded_data_TED$Time > 40],
+                binded_data_TED$Treatment[binded_data_TED$Resident_Species==
+                                             unique(binded_data_TED$Resident_Species)[j]&
+                                             binded_data_TED$Replicate==
+                                             unique(binded_data_TED$Replicate)[i] & 
+                                             binded_data_TED$Time > 40])
+  yvals <- split(y2[binded_data_TED$Resident_Species==
+                    unique(binded_data_TED$Resident_Species)[j]&
+                    binded_data_TED$Replicate==
+                    unique(binded_data_TED$Replicate)[i] & 
+                     binded_data_TED$Time > 40],
+                binded_data_TED$Treatment[binded_data_TED$Resident_Species==
+                                             unique(binded_data_TED$Resident_Species)[j]&
+                                             binded_data_TED$Replicate==
+                                             unique(binded_data_TED$Replicate)[i] & 
+                                             binded_data_TED$Time > 40])
+  mapply(lines,xvals,yvals,col=rainbow(6),lwd=1,lty=5)
+  }
+}
+
+#ylab
+mtext(text="TED",side=2,line=1,outer=T)
+mtext(text="Time (Days)",side=1,line=0,outer=T)
+#legends
+legend(x=-70,y=-0.3,levels(binded_data_TED$Treatment),pch=c(3,8,15:18),
+       col=rainbow(6),horiz=T,bty="n",xpd=NA)
+legend(x=-70,y=-0.4,c("Mono","Invader"),lty=c(1,2),lwd=c(2,1),bty="n",horiz=T,xpd=NA)
+
+
+####BS4s in both monoculture and those introduced to BS5s
+binded_data_TED %>% filter(Treatment %in% c("0","100","400")) %>% ggplot(aes(x=Time)) + 
+  geom_line(aes(x=Time,y=TED_BS4,group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=TED_BS5,group=Treatment,colour=Treatment),linetype="dashed") +
+  facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("TED Evolution")  + labs(x="Time(Days)",
+                                                                                         y="TED")
+
+```
+
+### Individual Evolution for Some Channels
+
+```{r}
+##############monocultures
+channels_mono <- lapply(logtrans_debris_filtered,function(x){
+   ttt <- fsApply(x,function(y){
+   mat  <- exprs(y)[,c("FSC.HLin","RED.B.HLin","YEL.B.HLin","GRN.B.HLin","SSC.ALin","SSC.HLin")]
+     ms <- apply(mat,2,mean)
+     vs <- apply(mat,2,var)
+     cv <- sqrt(vs)/ms
+     tv <- sum(diag(cov(mat))) ## total variance
+    vol <- sqrt(det(cov(mat))) ## volume covered
+     return(list(Means=ms,Vars=vs,Total_Vars=tv,Total_Vols=vol,CVS=cv))
+     })
+   return(ttt)
+ })
+
+Means_mono <- Vars_mono <- CV_mono <- data.frame()
+Total_Vars_mono <- data.frame()
+Total_Vols_mono <- data.frame()
+for(i in 1:length(channels_mono)){
+  #means
+ Means_mono <- rbind(Means_mono,data.frame(t(sapply(channels_mono[[i]],"[[","Means"))) )
+ #variances
+ Vars_mono <- rbind(Vars_mono,data.frame(t(sapply(channels_mono[[i]],"[[","Vars"))) )
+ #variances
+ CV_mono <- rbind(CV_mono,data.frame(t(sapply(channels_mono[[i]],"[[","CVS"))) )
+ #total variance
+ Total_Vars_mono <- rbind(Total_Vars_mono,data.frame(sapply(channels_mono[[i]],"[[","Total_Vars")) )
+ #total volume
+ Total_Vols_mono <- rbind(Total_Vols_mono,data.frame(sapply(channels_mono[[i]],"[[","Total_Vols")) )
+}
+
+Means_mono$Time <- Vars_mono$Time <- CV_mono$Time <- Total_Vars_mono$Time <- Total_Vols_mono$Time <-  debris_count_data$Time
+Means_mono$Treatment <- Vars_mono$Treatment <- CV_mono$Treatment <- Total_Vars_mono$Treatment <- Total_Vols_mono$Treatment <-  debris_count_data$Treatment
+Means_mono$Species <- Vars_mono$Species <- CV_mono$Species <- Total_Vars_mono$Species <- Total_Vols_mono$Species <- debris_count_data$Species
+Means_mono$Replicate <- Vars_mono$Replicate <- CV_mono$Replicate <- Total_Vars_mono$Replicate <- Total_Vols_mono$Replicate <- debris_count_data$Replicate
+names(Total_Vars_mono)[1] <- "Total_Variance"
+names(Total_Vols_mono)[1] <- "Total_Volume"
+rm(channels_mono)
+################Invasion
+channels_inv <- lapply(logtrans_debris_filtered_invasion,function(x){
+   ttt <- fsApply(x,function(y){
+   mat  <- exprs(y)[,c("FSC.HLin","RED.B.HLin","YEL.B.HLin","GRN.B.HLin","SSC.ALin",
+                       "SSC.HLin","BS4BS5.Indicator")]
+     yy_bs4 <- mat[mat[,"BS4BS5.Indicator"]==1,]
+     yy_bs5 <- mat[mat[,"BS4BS5.Indicator"]==0,]
+     #Means
+     ms_bs4 <- apply(yy_bs4[,c(1:6)],2,mean)
+     ms_bs5 <- apply(yy_bs5[,c(1:6)],2,mean)
+     #Variances
+     vs_bs4 <- apply(yy_bs4[,c(1:6)],2,var)
+     vs_bs5 <- apply(yy_bs5[,c(1:6)],2,var)
+     #coefficient of variation
+     cv_bs4 <- sqrt(vs_bs4)/ms_bs4
+     cv_bs5 <- sqrt(vs_bs5)/ms_bs5
+     #Total Variances
+     tv_bs4 <- sum(diag(cov(yy_bs4[,c(1:6)]))) ## total variance
+     tv_bs5 <- sum(diag(cov(yy_bs5[,c(1:6)])))
+     #Volume
+     vol_bs4 <- sqrt(det(cov(yy_bs4[,c(1:6)]))) ## volume covered
+     vol_bs5 <- sqrt(det(cov(yy_bs5[,c(1:6)])))
+     return(list(Means=c(BS4=ms_bs4,BS5=ms_bs5),Vars=c(BS4=vs_bs4,BS5=vs_bs5),
+                 Total_Vars=c(BS4=tv_bs4,BS5=tv_bs5),Total_Vols=c(BS4=vol_bs4,BS5=vol_bs5),
+                 CVS=c(BS4=cv_bs4,BS5=cv_bs5)   ))
+     })
+   return(ttt)
+ })
+
+Means_inv <- data.frame()
+Vars_inv <- Cvs_inv <- data.frame()
+Total_Vars_inv <- data.frame()
+Total_Vols_inv <- data.frame()
+for(i in 1:length(channels_inv)){
+  #means
+ Means_inv <- rbind(Means_inv,data.frame(t(sapply(channels_inv[[i]],"[[","Means"))) )
+ #variances
+ Cvs_inv <- rbind(Cvs_inv,data.frame(t(sapply(channels_inv[[i]],"[[","CVS"))) )
+ #variances
+ Vars_inv <- rbind(Vars_inv,data.frame(t(sapply(channels_inv[[i]],"[[","Vars"))) )
+ #total variance
+ Total_Vars_inv <- rbind(Total_Vars_inv,data.frame(t(sapply(channels_inv[[i]],"[[","Total_Vars"))) )
+ #total volume
+ Total_Vols_inv <- rbind(Total_Vols_inv,data.frame(t(sapply(channels_inv[[i]],"[[","Total_Vols"))) )
+}
+
+Means_inv$Time <- Vars_inv$Time <- Cvs_inv$Time <- Total_Vars_inv$Time <- Total_Vols_inv$Time <- debris_count_invasion_data$Time
+
+Means_inv$Treatment <- Vars_inv$Treatment <- Cvs_inv$Treatment <- Total_Vars_inv$Treatment <- Total_Vols_inv$Treatment <- debris_count_invasion_data$Treatment
+
+Means_inv$Resident_Species <- Vars_inv$Resident_Species <- Cvs_inv$Resident_Species <- 
+  Total_Vars_inv$Resident_Species <- Total_Vols_inv$Resident_Species <- debris_count_invasion_data$Resident_Species
+
+Means_inv$Replicate <- Vars_inv$Replicate <- Cvs_inv$Replicate <- Total_Vars_inv$Replicate <- Total_Vols_inv$Replicate <- debris_count_invasion_data$Replicate
+
+rm(channels_inv)
+#######Combining things together
+#MEANS
+bs4_means_mono <- Means_mono %>% 
+            filter(Species==4) %>% rename(Resident_Species=Species,BS4.FSC.HLin=FSC.HLin,
+                                          BS4.RED.B.HLin=RED.B.HLin,BS4.YEL.B.HLin=YEL.B.HLin,
+                                          BS4.GRN.B.HLin=GRN.B.HLin,BS4.SSC.ALin=SSC.ALin,
+                                          BS4.SSC.HLin=SSC.HLin) %>%
+            mutate(BS5.FSC.HLin=rep(NA,126),BS5.RED.B.HLin=rep(NA,126),BS5.YEL.B.HLin=rep(NA,126),
+                                          BS5.GRN.B.HLin=rep(NA,126),BS5.SSC.ALin=rep(NA,126),
+                   BS5.SSC.HLin=rep(NA,126))
+
+bs5_means_mono <- Means_mono %>% 
+            filter(Species==5) %>% rename(Resident_Species=Species,BS5.FSC.HLin=FSC.HLin,
+                                          BS5.RED.B.HLin=RED.B.HLin,BS5.YEL.B.HLin=YEL.B.HLin,
+                                          BS5.GRN.B.HLin=GRN.B.HLin,BS5.SSC.ALin=SSC.ALin,
+                                          BS5.SSC.HLin=SSC.HLin) %>%
+            mutate(BS4.FSC.HLin=rep(NA,126),BS4.RED.B.HLin=rep(NA,126),BS4.YEL.B.HLin=rep(NA,126),
+                                          BS4.GRN.B.HLin=rep(NA,126),BS4.SSC.HLin=rep(NA,126),
+                   BS4.SSC.ALin=rep(NA,126))
+Means_data <- rbind(bs4_means_mono,bs5_means_mono,Means_inv)
+#VARIANCES
+bs4_vars_mono <- Vars_mono %>% 
+            filter(Species==4) %>% rename(Resident_Species=Species,BS4.FSC.HLin=FSC.HLin,
+                                          BS4.RED.B.HLin=RED.B.HLin,BS4.YEL.B.HLin=YEL.B.HLin,
+                                          BS4.GRN.B.HLin=GRN.B.HLin,BS4.SSC.ALin=SSC.ALin,
+                                          BS4.SSC.HLin=SSC.HLin) %>%
+            mutate(BS5.FSC.HLin=rep(NA,126),BS5.RED.B.HLin=rep(NA,126),BS5.YEL.B.HLin=rep(NA,126),
+                                          BS5.GRN.B.HLin=rep(NA,126),BS5.SSC.ALin=rep(NA,126),
+                   BS5.SSC.HLin=rep(NA,126))
+
+bs5_vars_mono <- Vars_mono %>% 
+            filter(Species==5) %>% rename(Resident_Species=Species,BS5.FSC.HLin=FSC.HLin,
+                                          BS5.RED.B.HLin=RED.B.HLin,BS5.YEL.B.HLin=YEL.B.HLin,
+                                          BS5.GRN.B.HLin=GRN.B.HLin,BS5.SSC.ALin=SSC.ALin,
+                                          BS5.SSC.HLin=SSC.HLin) %>%
+            mutate(BS4.FSC.HLin=rep(NA,126),BS4.RED.B.HLin=rep(NA,126),BS4.YEL.B.HLin=rep(NA,126),
+                                          BS4.GRN.B.HLin=rep(NA,126),BS4.SSC.HLin=rep(NA,126),
+                   BS4.SSC.ALin=rep(NA,126))
+Vars_data <- rbind(bs4_vars_mono,bs5_vars_mono,Vars_inv)
+
+#TOTAL VARIANCES
+bs4_total_vars_mono <- Total_Vars_mono %>% filter(Species==4) %>% 
+              rename(Resident_Species=Species,BS4_Total_Variance=Total_Variance) %>% 
+              mutate(BS5_Total_Variance=rep(NA,126))
+bs5_total_vars_mono <- Total_Vars_mono %>% filter(Species==5) %>% 
+              rename(Resident_Species=Species,BS5_Total_Variance=Total_Variance) %>% 
+              mutate(BS4_Total_Variance=rep(NA,126))
+
+Total_Vars_data <- rbind(bs4_total_vars_mono,bs5_total_vars_mono,
+                         Total_Vars_inv %>% rename(BS4_Total_Variance=BS4,BS5_Total_Variance=BS5))
+#Coefficient of variation
+bs4_cv_mono <- CV_mono %>% 
+            filter(Species==4) %>% rename(Resident_Species=Species,BS4.FSC.HLin=FSC.HLin,
+                                          BS4.RED.B.HLin=RED.B.HLin,BS4.YEL.B.HLin=YEL.B.HLin,
+                                          BS4.GRN.B.HLin=GRN.B.HLin,BS4.SSC.ALin=SSC.ALin,
+                                          BS4.SSC.HLin=SSC.HLin) %>%
+            mutate(BS5.FSC.HLin=rep(NA,126),BS5.RED.B.HLin=rep(NA,126),BS5.YEL.B.HLin=rep(NA,126),
+                                          BS5.GRN.B.HLin=rep(NA,126),BS5.SSC.ALin=rep(NA,126),
+                   BS5.SSC.HLin=rep(NA,126))
+
+bs5_cv_mono <- CV_mono %>% 
+            filter(Species==5) %>% rename(Resident_Species=Species,BS5.FSC.HLin=FSC.HLin,
+                                          BS5.RED.B.HLin=RED.B.HLin,BS5.YEL.B.HLin=YEL.B.HLin,
+                                          BS5.GRN.B.HLin=GRN.B.HLin,BS5.SSC.ALin=SSC.ALin,
+                                          BS5.SSC.HLin=SSC.HLin) %>%
+            mutate(BS4.FSC.HLin=rep(NA,126),BS4.RED.B.HLin=rep(NA,126),BS4.YEL.B.HLin=rep(NA,126),
+                                          BS4.GRN.B.HLin=rep(NA,126),BS4.SSC.HLin=rep(NA,126),
+                   BS4.SSC.ALin=rep(NA,126))
+CV_data <- rbind(bs4_cv_mono,bs5_cv_mono,Cvs_inv)
+###cleaning up
+rm(bs4_means_mono,bs4_vars_mono,bs5_means_mono,bs5_vars_mono,Means_inv,Means_mono,bs4_total_vars_mono,
+   bs5_total_vars_mono,bs4_cv_mono,bs5_cv_mono,CV_mono,Cvs_inv)
+rm(Vars_inv,Vars_mono,Total_Vars_inv,Total_Vars_mono)
+
+####plotting
+#means
+Means_data %>% filter(Treatment %in% c("0","100","400")) %>%
+  ggplot(aes(x=Time,colour=Treatment,group=Treatment)) + 
+  geom_line(aes(x=Time,y=BS4.YEL.B.HLin,group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=BS5.YEL.B.HLin,group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("Yellow Beam") + 
+  labs(x="Time(Days)",y="log(Average YEL.B.HLin)")
+
+Means_data %>% filter(Treatment %in% c("0","100","400")) %>%
+  ggplot(aes(x=Time,colour=Treatment,group=Treatment)) + 
+  geom_line(aes(x=Time,y=BS4.RED.B.HLin,group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=BS5.RED.B.HLin,group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("RED Beam") + 
+  labs(x="Time(Days)",y="log(Average RED.B.HLin)")
+
+Means_data %>% filter(Treatment %in% c("0","100","400")) %>%
+  ggplot(aes(x=Time,colour=Treatment,group=Treatment)) + 
+  geom_line(aes(x=Time,y=log(BS4.GRN.B.HLin),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=log(BS5.GRN.B.HLin),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("Green Beam") + 
+  labs(x="Time(Days)",y="log(Average)")
+
+Means_data %>% filter(Treatment %in% c("0","100","400")) %>%
+  ggplot(aes(x=Time,colour=Treatment,group=Treatment)) + 
+  geom_line(aes(x=Time,y=log(BS4.FSC.HLin),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=log(BS5.FSC.HLin),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("Forward Scatter") + 
+  labs(x="Time(Days)",y="log(Average)")
+
+Means_data %>% filter(Treatment %in% c("0","100","400")) %>%
+  ggplot(aes(x=Time,colour=Treatment,group=Treatment)) + 
+  geom_line(aes(x=Time,y=log(BS4.SSC.HLin),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=log(BS5.SSC.HLin),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("Side Scatter Height") + 
+  labs(x="Time(Days)",y="log(Average)")
+
+Means_data %>% filter(Treatment %in% c("0","100","400")) %>%
+  ggplot(aes(x=Time,colour=Treatment,group=Treatment)) + 
+  geom_line(aes(x=Time,y=log(BS4.SSC.ALin),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=log(BS5.SSC.ALin),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("Side Scatter Area") + 
+  labs(x="Time(Days)",y="log(Average)")
+
+####variances
+Vars_data %>% filter(Treatment %in% c("0","100","400")) %>%
+  ggplot(aes(x=Time,colour=Treatment,group=Treatment)) + 
+  geom_line(aes(x=Time,y=log(BS4.YEL.B.HLin),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=log(BS5.YEL.B.HLin),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("Variance of Yellow Beam") + 
+  labs(x="Time(Days)",y="log(Variance)")
+
+Vars_data %>% filter(Treatment %in% c("0","100","400")) %>%
+  ggplot(aes(x=Time,colour=Treatment,group=Treatment)) + 
+  geom_line(aes(x=Time,y=log(BS4.RED.B.HLin),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=log(BS5.RED.B.HLin),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("Varaince of RED Beam") + 
+  labs(x="Time(Days)",y="log(Variance)")
+
+Vars_data %>% filter(Treatment %in% c("0","100","400")) %>%
+  ggplot(aes(x=Time,colour=Treatment,group=Treatment)) + 
+  geom_line(aes(x=Time,y=log(BS4.GRN.B.HLin),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=log(BS5.GRN.B.HLin),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("Variance of Green Beam") + 
+  labs(x="Time(Days)",y="log(Variance)")
+
+Vars_data %>% filter(Treatment %in% c("0","100","400")) %>%
+  ggplot(aes(x=Time,colour=Treatment,group=Treatment)) + 
+  geom_line(aes(x=Time,y=log(BS4.FSC.HLin),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=log(BS5.FSC.HLin),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("Variance of Forward Scatter") + 
+  labs(x="Time(Days)",y="log(Variance)")
+
+Vars_data %>% filter(Treatment %in% c("0","100","400")) %>%
+  ggplot(aes(x=Time,colour=Treatment,group=Treatment)) + 
+  geom_line(aes(x=Time,y=log(BS4.SSC.HLin),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=log(BS5.SSC.HLin),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("Variance of Side Scatter Height") + 
+  labs(x="Time(Days)",y="log(Variance)")
+
+Vars_data %>% filter(Treatment %in% c("0","100","400")) %>%
+  ggplot(aes(x=Time,colour=Treatment,group=Treatment)) + 
+  geom_line(aes(x=Time,y=log(BS4.SSC.ALin),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=log(BS5.SSC.ALin),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("Variance of Side Scatter Area") + 
+  labs(x="Time(Days)",y="log(Variance)")
+
+#Total Variance
+Total_Vars_data %>% filter(Treatment %in% c("0","100","400")) %>%
+  ggplot(aes(x=Time,colour=Treatment,group=Treatment)) + 
+  geom_line(aes(x=Time,y=log(BS4_Total_Variance),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=log(BS5_Total_Variance),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("Total Variance") + 
+  labs(x="Time(Days)",y="log(Total Variance)")
+
+##Coefficient of Variation
+CV_data %>% filter(Treatment %in% c("0","100","400")) %>%
+  ggplot(aes(x=Time,colour=Treatment,group=Treatment)) + 
+  geom_line(aes(x=Time,y=log(BS4.YEL.B.HLin),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=log(BS5.YEL.B.HLin),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("Coefficint of Variation
+                                                                of Yellow Beam") + 
+  labs(x="Time(Days)",y="CV_YEL.B.HLin")
+
+CV_data %>% filter(Treatment %in% c("0","100","400")) %>%
+  ggplot(aes(x=Time,colour=Treatment,group=Treatment)) + 
+  geom_line(aes(x=Time,y=BS4.RED.B.HLin,group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=BS5.RED.B.HLin,group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("Coefficint of Variation of RED Beam") + 
+  labs(x="Time(Days)",y="log(Average RED.B.HLin)")
+
+CV_data %>% filter(Treatment %in% c("0","100","400")) %>%
+  ggplot(aes(x=Time,colour=Treatment,group=Treatment)) + 
+  geom_line(aes(x=Time,y=log(BS4.GRN.B.HLin),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=log(BS5.GRN.B.HLin),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("Coefficint of Variation of Green Beam") + 
+  labs(x="Time(Days)",y="log(Average)")
+
+CV_data %>% filter(Treatment %in% c("0","100","400")) %>%
+  ggplot(aes(x=Time,colour=Treatment,group=Treatment)) + 
+  geom_line(aes(x=Time,y=log(BS4.FSC.HLin),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=log(BS5.FSC.HLin),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("Coefficient of Variation of Forward Scatter") + 
+  labs(x="Time(Days)",y="log(Average)")
+
+CV_data %>% filter(Treatment %in% c("0","100","400")) %>%
+  ggplot(aes(x=Time,colour=Treatment,group=Treatment)) + 
+  geom_line(aes(x=Time,y=log(BS4.SSC.HLin),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=log(BS5.SSC.HLin),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("Coefficient of Variation of Side Scatter Height") + 
+  labs(x="Time(Days)",y="log(Average)")
+
+CV_data %>% filter(Treatment %in% c("0","100","400")) %>%
+  ggplot(aes(x=Time,colour=Treatment,group=Treatment)) + 
+  geom_line(aes(x=Time,y=log(BS4.SSC.ALin),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=log(BS5.SSC.ALin),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("Coefficient of Variation of Side Scatter Area") + 
+  labs(x="Time(Days)",y="log(Average)")
+
+#names(CV_data) <- paste0("CV.",names(CV_data))
+bind_cols(CV_data,Vars_data) %>% filter(Time < 42  & Treatment=="0") %>% ggplot(aes(x=Time,group=Treatment)) + 
+geom_line(aes(y=log(BS4.FSC.HLin)),linetype="solid",col=1) + 
+geom_line(aes(y=log(CV.BS4.FSC.HLin)),linetype="dashed",col=1) + 
+geom_line(aes(y=log(BS5.FSC.HLin)),linetype="solid",col=2) + 
+geom_line(aes(y=log(CV.BS5.FSC.HLin)),linetype="dashed",col=2) +   
+facet_grid(Replicate~Resident_Species) + theme_bw()  + 
+labs(x="Time",y="Variance")
+
+
+bind_cols(CV_data,Means_data) %>% filter(Time < 42  & Treatment=="0") %>% ggplot(aes(x=Time,group=Treatment)) + 
+geom_line(aes(y=log(BS4.FSC.HLin)),linetype="solid",col=1) + 
+geom_line(aes(y=log(CV.BS4.FSC.HLin)),linetype="dashed",col=1) + 
+geom_line(aes(y=log(BS5.FSC.HLin)),linetype="solid",col=2) + 
+geom_line(aes(y=log(CV.BS5.FSC.HLin)),linetype="dashed",col=2) +   
+facet_grid(Replicate~Resident_Species) + theme_bw()  + 
+labs(x="Time",y="Variance")
+
+
+bind_cols(Means_data,Vars_data) %>% filter(Time < 42  & Treatment=="0") %>% ggplot(aes(x=Time,group=Treatment)) + 
+geom_line(aes(y=log(BS4.FSC.HLin)),linetype="solid",col=1) + 
+geom_line(aes(y=log(BS4.FSC.HLin1)),linetype="dashed",col=1) + 
+geom_line(aes(y=log(BS5.FSC.HLin)),linetype="solid",col=2) + 
+geom_line(aes(y=log(BS5.FSC.HLin1)),linetype="dashed",col=2) +   
+facet_grid(Replicate~Resident_Species) + theme_bw()  + 
+labs(x="Time",y="Mean/Variance")
+```
+
+### Correlations Between Traits
+
+```{r}
+############  Monoculture ###########
+#########Exploring Correlations between the Traits in the reduced flow frames
+#every 10 row is a correlation matrix belonging to a treatment level
+correlations <- lapply(logtrans_debris_filtered,function(x){
+  cors <- fsApply(x,function(y){
+    p <- cor(exprs(y)[,-c(11)])
+     return(p)
+     })
+  along <- seq(1,360,by=10)
+  inner <- vector("list",10)
+  for(j in 1:36){
+    c <- cors[along[j]:(along[j]+9),]
+    #inner[[j]] <- c[upper.tri(c,diag=T)]
+    d <- c()
+    for(k in 1:9){
+      d <- c(d,as.numeric(c[k,(k+1):10]))
+    }
+    inner[[j]] <- d
+  }
+   names(inner) <- pnames
+   return(inner)
+})
+
+cnames <- combn(colnames(logtrans_debris_filtered$Day1)[-11],2)
+correlation_dataset <- data.frame() 
+for(i in 1:7){
+  bs <- data.frame()
+  for(j in 1:36){
+   dd <- data.frame(Corr=correlations[[i]][[j]],N1=cnames[1,],N2=cnames[2,],
+                    File=rep(pnames[j],45))
+   bs <- rbind(bs,dd)
+  }
+ correlation_dataset <- rbind(correlation_dataset,bs)
+}
+
+
+cl <- makeCluster(detectCores()-1)
+registerDoParallel(cl)
+
+test <- foreach(i=1:length(correlation_dataset$Corr),.combine="comb") %dopar% {
+  Treatment <- stringr::str_split(correlation_dataset$File,"_")[[i]][[3]]
+  Specie <- stringr::str_split(correlation_dataset$File,"_")[[i]][[2]]
+  Replicate <- stringr::str_split(correlation_dataset$File,"_")[[i]][[4]]
+  list(Treatment,Specie,Replicate)
+}
+
+stopImplicitCluster()
+
+correlation_dataset$Time <- rep(unique(debris_count_data$Time),each=45*36)
+correlation_dataset$Treatment <- test[[1]]
+correlation_dataset$Specie <- test[[2]]
+correlation_dataset$Replicate <- test[[3]]
+
+rm(correlations,bs,dd,test)
+########### Invasion Experiment ###############
+
+correlation_invasion <- lapply(logtrans_debris_filtered_invasion,function(x){
+  cors <- fsApply(x,function(y){
+    y <- exprs(y)
+    y4 <- y[y[,"BS4BS5.Indicator"]==1,]
+    y5 <- y[y[,"BS4BS5.Indicator"]==0,]
+    p4 <- cor(y4[,-c(11,12)])
+    p5 <- cor(y5[,-c(11,12)])
+     return(list(p4,p5))
+     })
+  registerDoParallel(cl)
+  b4 <-   foreach(i=1:36,.combine="rbind") %dopar%{
+    cors[[i]][[1]]
+  }
+  b5 <- foreach(i=1:36,.combine="rbind") %dopar%{
+    cors[[i]][[2]]
+  }
+  stopImplicitCluster()
+ 
+  along <- seq(1,360,by=10)
+  inner4 <- inner5 <- vector("list",10)
+  for(j in 1:36){
+    c4 <- b4[along[j]:(along[j]+9),]
+    c5 <- b5[along[j]:(along[j]+9),]
+    d4 <- d5 <- c()
+    for(k in 1:9){
+      d4 <- c(d4,as.numeric(c4[k,(k+1):10]))
+      d5 <- c(d5,as.numeric(c5[k,(k+1):10]))
+    }
+    inner4[[j]] <- d4
+    inner5[[j]] <- d5
+  }
+   names(inner4) <- names(inner5) <-pnames
+   return(list(BS4=inner4,BS5=inner5))
+})
+
+cnames <- combn(colnames(logtrans_debris_filtered_invasion$Day1Dilmix)[-c(11,12)],2)
+correlation_invasion_dataset <- data.frame() 
+for(i in 1:10){
+  bs4 <- bs5 <- data.frame()
+  for(j in 1:36){
+   dd <- data.frame(Corr=correlation_invasion[[i]][[1]][[j]],N1=cnames[1,],N2=cnames[2,],
+                    File=rep(pnames[j],45))
+   dd2 <- data.frame(Corr=correlation_invasion[[i]][[2]][[j]],N1=cnames[1,],N2=cnames[2,],
+                    File=rep(pnames[j],45))
+   bs4 <- rbind(bs4,dd);bs5 <- rbind(bs5,dd2)
+  }
+  dd3 <- cbind(bs4,bs5[,1])
+  names(dd3)[1] <- "BS4.Corr"; names(dd3)[5] <- "BS5.Corr"
+ correlation_invasion_dataset <- rbind(correlation_invasion_dataset,dd3)
+}
+rm(bs4,bs5,dd,dd2,dd3,correlation_invasion)
+
+cl <- makeCluster(detectCores()-1)
+registerDoParallel(cl)
+test <- foreach(i=1:length(correlation_invasion_dataset$BS4.Corr),.combine="comb") %dopar% {
+  Treatment <- stringr::str_split(correlation_invasion_dataset$File,"_")[[i]][[3]]
+  Specie <- stringr::str_split(correlation_invasion_dataset$File,"_")[[i]][[2]]
+  Replicate <- stringr::str_split(correlation_invasion_dataset$File,"_")[[i]][[4]]
+  list(Treatment,Specie,Replicate)
+}
+stopImplicitCluster()
+
+correlation_invasion_dataset$Treatment <- test[[1]]
+correlation_invasion_dataset$Specie <- test[[2]]
+correlation_invasion_dataset$Replicate <- test[[3]]
+correlation_invasion_dataset$Time <- rep(unique(debris_count_invasion_data$Time),each=45*36)
+
+#######Combining both datasets
+bs4_mono <- correlation_dataset %>% filter(Specie=="4") %>% rename(BS4.Corr=Corr) %>%
+  mutate(BS5.Corr=rep(NA,5670))
+bs5_mono <- correlation_dataset %>% filter(Specie=="5") %>% rename(BS5.Corr=Corr) %>%
+  mutate(BS4.Corr=rep(NA,5670))
+correlation_combine <- rbind(bs4_mono,bs5_mono,correlation_invasion_dataset)
+correlation_combine$Treatment[correlation_combine$Treatment=="Control"] <- 0
+rm(bs4_mono,bs5_mono,correlation_dataset,correlation_invasion_dataset)
+
+##Plotting
+correlation_combine %>% filter(Treatment %in% c("0","100","400")) %>% filter(N1=="FSC.HLin") %>% filter(N2=="SSC.HLin") %>% ggplot(aes(x=Time,group=Treatment,color=Treatment))  + 
+  geom_line(aes(x=Time,y=atanh(BS4.Corr),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=atanh(BS5.Corr),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Specie) + theme_bw() + ggtitle("Forward Scatter Against Side Scatter Height") + 
+  labs(x="Time(Days)",y="atanh(Correlation)")
+
+correlation_combine %>% filter(Treatment %in% c("0","100","400")) %>% filter(N1=="FSC.HLin") %>% filter(N2=="SSC.ALin") %>% ggplot(aes(x=Time,group=Treatment,color=Treatment))  + 
+  geom_line(aes(x=Time,y=atanh(BS4.Corr),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=atanh(BS5.Corr),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Specie) + theme_bw() + ggtitle("Forward Scatter Against Side Scatter Area") + 
+  labs(x="Time(Days)",y="atanh(Correlation)")
+
+correlation_combine %>% filter(Treatment %in% c("0","100","400")) %>% filter(N1=="FSC.HLin") %>% filter(N2=="GRN.B.HLin") %>% ggplot(aes(x=Time,group=Treatment,color=Treatment))  + 
+  geom_line(aes(x=Time,y=atanh(BS4.Corr),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=atanh(BS5.Corr),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Specie) + theme_bw() + ggtitle("Forward Scatter Against Green Beam") + 
+  labs(x="Time(Days)",y="atanh(Correlation)")
+
+correlation_combine %>% filter(Treatment %in% c("0","100","400")) %>% filter(N1=="FSC.HLin") %>% filter(N2=="RED.B.HLin") %>% ggplot(aes(x=Time,group=Treatment,color=Treatment))  + 
+  geom_line(aes(x=Time,y=atanh(BS4.Corr),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=atanh(BS5.Corr),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Specie) + theme_bw() + ggtitle("Forward Scatter Against Red Beam") + 
+  labs(x="Time(Days)",y="atanh(Correlation)")
+
+correlation_combine %>% filter(Treatment %in% c("0","100","400")) %>% filter(N1=="FSC.HLin") %>% filter(N2=="YEL.B.HLin") %>% ggplot(aes(x=Time,group=Treatment,color=Treatment))  + 
+  geom_line(aes(x=Time,y=atanh(BS4.Corr),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=atanh(BS5.Corr),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Specie) + theme_bw() + ggtitle("Forward Scatter Against Yellow Beam") + 
+  labs(x="Time(Days)",y="atanh(Correlation)")
+
+correlation_combine %>% filter(Treatment %in% c("0","100","400")) %>% filter(N1=="SSC.HLin") %>% filter(N2=="SSC.ALin") %>% ggplot(aes(x=Time,group=Treatment,color=Treatment))  + 
+  geom_line(aes(x=Time,y=atanh(BS4.Corr),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=atanh(BS5.Corr),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Specie) + theme_bw() + ggtitle("Side Scatter Height Against Side Scatter Area") + 
+  labs(x="Time(Days)",y="atanh(Correlation)")
+
+correlation_combine %>% filter(Treatment %in% c("0","100","400")) %>% filter(N1=="SSC.HLin") %>% filter(N2=="GRN.B.HLin") %>% ggplot(aes(x=Time,group=Treatment,color=Treatment))  + 
+  geom_line(aes(x=Time,y=atanh(BS4.Corr),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=atanh(BS5.Corr),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Specie) + theme_bw() + ggtitle("Side Scatter Height Against Green Beam") + 
+  labs(x="Time(Days)",y="atanh(Correlation)")
+
+correlation_combine %>% filter(Treatment %in% c("0","100","400")) %>% filter(N1=="SSC.HLin") %>% filter(N2=="RED.B.HLin") %>% ggplot(aes(x=Time,group=Treatment,color=Treatment))  + 
+  geom_line(aes(x=Time,y=atanh(BS4.Corr),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=atanh(BS5.Corr),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Specie) + theme_bw() + ggtitle("Side Scatter Height Against Red Beam") + 
+  labs(x="Time(Days)",y="atanh(Correlation)")
+
+correlation_combine %>% filter(Treatment %in% c("0","100","400")) %>% filter(N1=="SSC.HLin") %>% filter(N2=="YEL.B.HLin") %>% ggplot(aes(x=Time,group=Treatment,color=Treatment))  + 
+  geom_line(aes(x=Time,y=atanh(BS4.Corr),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=atanh(BS5.Corr),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Specie) + theme_bw() + ggtitle("Side Scatter Height Against Yellow Beam") + 
+  labs(x="Time(Days)",y="atanh(Correlation)")
+
+correlation_combine %>% filter(Treatment %in% c("0","100","400")) %>% filter(N1=="GRN.B.HLin") %>% filter(N2=="SSC.ALin") %>% ggplot(aes(x=Time,group=Treatment,color=Treatment))  + 
+  geom_line(aes(x=Time,y=atanh(BS4.Corr),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=atanh(BS5.Corr),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Specie) + theme_bw() + ggtitle("Green Beam Against Side Scatter Area") + 
+  labs(x="Time(Days)",y="atanh(Correlation)")
+
+correlation_combine %>% filter(Treatment %in% c("0","100","400")) %>% filter(N1=="GRN.B.HLin") %>% filter(N2=="YEL.B.HLin") %>% ggplot(aes(x=Time,group=Treatment,color=Treatment))  + 
+  geom_line(aes(x=Time,y=atanh(BS4.Corr),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=atanh(BS5.Corr),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Specie) + theme_bw() + ggtitle("Green Beam Against Yellow Beam") + 
+  labs(x="Time(Days)",y="atanh(Correlation)")
+
+correlation_combine %>% filter(Treatment %in% c("0","100","400")) %>% filter(N1=="GRN.B.HLin") %>% filter(N2=="RED.B.HLin") %>% ggplot(aes(x=Time,group=Treatment,color=Treatment))  + 
+  geom_line(aes(x=Time,y=atanh(BS4.Corr),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=atanh(BS5.Corr),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Specie) + theme_bw() + ggtitle("Green Beam Against Red Beam") + 
+  labs(x="Time(Days)",y="atanh(Correlation)")
+
+correlation_combine %>% filter(Treatment %in% c("0","100","400")) %>% filter(N1=="YEL.B.HLin") %>% filter(N2=="RED.B.HLin") %>% ggplot(aes(x=Time,group=Treatment,color=Treatment))  + 
+  geom_line(aes(x=Time,y=atanh(BS4.Corr),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=atanh(BS5.Corr),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Specie) + theme_bw() + ggtitle("Yellow Beam Against Red Beam") + 
+  labs(x="Time(Days)",y="atanh(Correlation)")
+
+correlation_combine %>% filter(Treatment %in% c("0","100","400")) %>% filter(N1=="YEL.B.HLin") %>% filter(N2=="SSC.ALin") %>% ggplot(aes(x=Time,group=Treatment,color=Treatment))  + 
+  geom_line(aes(x=Time,y=atanh(BS4.Corr),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=atanh(BS5.Corr),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Specie) + theme_bw() + ggtitle("Yellow Beam Against Side Scatter Area") + 
+  labs(x="Time(Days)",y="atanh(Correlation)")
+
+orrelation_combine %>% filter(Treatment %in% c("0","100","400")) %>% filter(N1=="RED.B.HLin") %>% filter(N2=="SSC.ALin") %>% ggplot(aes(x=Time,group=Treatment,color=Treatment))  + 
+  geom_line(aes(x=Time,y=atanh(BS4.Corr),group=Treatment,colour=Treatment),linetype="solid") + 
+  geom_line(aes(x=Time,y=atanh(BS5.Corr),group=Treatment,colour=Treatment),linetype="dashed") + 
+  facet_grid(Replicate~Specie) + theme_bw() + ggtitle("Red Beam Against Side Scatter Area") + 
+  labs(x="Time(Days)",y="atanh(Correlation)")
+```
+
+
+### Extracting Needed Data Set
+
+```{r}
+counter <- 0
+mono <- lapply(logtrans_debris_filtered, function(x){
+  expr_mat <- fsApply(x,function(y){
+    counter <<- counter + 1
+      if(counter <= 18 & substring(identifier(y),first=nchar(identifier(y)))=="1"){
+        a <- exprs(y)[,c("FSC.HLin","SSC.ALin","SSC.HLin","RED.B.HLin","YEL.B.HLin","GRN.B.HLin")]
+        return(a)
+      } else if(counter <= 18 & substring(identifier(y),first=nchar(identifier(y)))=="2"){
+        a <- exprs(y)[,c("FSC.HLin","SSC.ALin","SSC.HLin","RED.B.HLin","YEL.B.HLin","GRN.B.HLin")]
+        return(a)
+      }else if(counter <= 18 & substring(identifier(y),first=nchar(identifier(y)))=="3"){
+        a <- exprs(y)[,c("FSC.HLin","SSC.ALin","SSC.HLin","RED.B.HLin","YEL.B.HLin","GRN.B.HLin")]
+        return(a)
+      }else if((counter > 18 & counter <= 36) &
+               substring(identifier(y),first=nchar(identifier(y)))=="1"){
+        a <- exprs(y)[,c("FSC.HLin","SSC.ALin","SSC.HLin","RED.B.HLin","YEL.B.HLin","GRN.B.HLin")]
+        return(a)
+      }else if((counter > 18 & counter <= 36) &
+               substring(identifier(y),first=nchar(identifier(y)))=="2"){
+        a <- exprs(y)[,c("FSC.HLin","SSC.ALin","SSC.HLin","RED.B.HLin","YEL.B.HLin","GRN.B.HLin")]
+        return(a)
+      }else if((counter > 18 & counter <= 36) &
+               substring(identifier(y),first=nchar(identifier(y)))=="3"){
+        a <- exprs(y)[,c("FSC.HLin","SSC.ALin","SSC.HLin","RED.B.HLin","YEL.B.HLin","GRN.B.HLin")]
+        return(a)
+      }
+  },simplify = F)
+  counter <<- 0
+   return(expr_mat)
+ })
+
+Monoculture_data <- data.frame()
+for(i in 1:length(mono)){
+  registerDoParallel(cl)
+  dd <- foreach(j = 1:length(mono[[i]]),.combine="rbind") %dopar% {
+      a <- as.data.frame(mono[[i]][[j]])
+      bs <- data.frame(a,
+                Species=rep(stringr::str_split(pnames[[j]],"_")[[1]][[2]],dim(a)[[1]]),
+                Treatment=rep(stringr::str_split(pnames[[j]],"_")[[1]][[3]],dim(a)[[1]]),
+                Replicate=as.numeric(rep(stringr::str_split(pnames[[j]],"_")[[1]][[4]],dim(a)[[1]])),
+                Time=rep(unique(debris_count_data$Time)[[i]],dim(a)[[1]]),
+                id=rep(pnames[[j]],dim(a)[[1]]) )
+      return(bs)
+  }
+ stopImplicitCluster()
+ Monoculture_data <- rbind(Monoculture_data,dd)
+}
+rm(dd)
+Monoculture_data$Treatment <- as.character(Monoculture_data$Treatment)
+Monoculture_data$Treatment[Monoculture_data$Treatment=="Control"] <- "0"
+
+Monoculture_data <- merge(Monoculture_data, 
+                          debris_count_data %>% dplyr::select(CyanoAbundance,Dilution,Time,Treatment,
+                                                              Species,Replicate),
+                          by=intersect(names(debris_count_data),names(Monoculture_data)))
+Monoculture_data <- Monoculture_data %>% filter(Time!=34)
+Monoculture_data <- Monoculture_data %>% dplyr::filter(!(Time==40 &
+                                                  id=="#_5_Control_2")) %>%
+                                         dplyr::filter(!(Time==40 & id=="#_5_Control_3"))
+
+#Monoculture_data <- Monoculture_data %>%
+#  mutate(BS4Abundance=c(Monoculture_data$CyanoAbundance[1:595733],rep(NA,473383)),
+#         BS5Abundance=c(rep(NA,595733),Monoculture_data$CyanoAbundance[595734:1069116]))
+#Monoculture_data <- Monoculture_data %>% select(-CyanoAbundance)
+Monoculture_data <- Monoculture_data %>% mutate(Tsp=rep(0,nrow(Monoculture_data)))
+
+#BS4,BS5 indicators
+Monoculture_data$BS4BS5.Indicator <- NA
+Monoculture_data$BS4BS5.Indicator[which(Monoculture_data$Species=="4")] <- 1
+Monoculture_data$BS4BS5.Indicator[which(Monoculture_data$Species=="5")] <- 0
+
+#
+Monoculture_data$AbundanceID <- NA
+Monoculture_data$AbundanceID[which(Monoculture_data$Species=="4")] <- 1
+Monoculture_data$AbundanceID[which(Monoculture_data$Species=="5")] <- 0
+
+
+######################  Invasion
+counter <- 0
+invasion <- lapply(logtrans_debris_filtered_invasion, function(x){
+  expr_mat <- fsApply(x,function(y){
+    counter <<- counter + 1
+      if(counter <= 18 & substring(identifier(y),first=nchar(identifier(y)))=="1"){
+        a <- exprs(y)[,c("FSC.HLin","SSC.ALin","SSC.HLin","RED.B.HLin",
+                         "YEL.B.HLin","GRN.B.HLin","BS4BS5.Indicator")]
+        
+        return(a)
+      } else if(counter <= 18 & substring(identifier(y),first=nchar(identifier(y)))=="2"){
+        a <- exprs(y)[,c("FSC.HLin","SSC.ALin","SSC.HLin","RED.B.HLin",
+                         "YEL.B.HLin","GRN.B.HLin","BS4BS5.Indicator")]
+        return(a)
+      }else if(counter <= 18 & substring(identifier(y),first=nchar(identifier(y)))=="3"){
+        a <- exprs(y)[,c("FSC.HLin","SSC.ALin","SSC.HLin","RED.B.HLin",
+                         "YEL.B.HLin","GRN.B.HLin","BS4BS5.Indicator")]
+        return(a)
+      }else if((counter > 18 & counter <= 36) &
+               substring(identifier(y),first=nchar(identifier(y)))=="1"){
+        a <- exprs(y)[,c("FSC.HLin","SSC.ALin","SSC.HLin","RED.B.HLin",
+                         "YEL.B.HLin","GRN.B.HLin","BS4BS5.Indicator")]
+        return(a)
+      }else if((counter > 18 & counter <= 36) &
+               substring(identifier(y),first=nchar(identifier(y)))=="2"){
+        a <- exprs(y)[,c("FSC.HLin","SSC.ALin","SSC.HLin","RED.B.HLin",
+                         "YEL.B.HLin","GRN.B.HLin","BS4BS5.Indicator")]
+        return(a)
+      }else if((counter > 18 & counter <= 36) &
+               substring(identifier(y),first=nchar(identifier(y)))=="3"){
+        a <- exprs(y)[,c("FSC.HLin","SSC.ALin","SSC.HLin","RED.B.HLin",
+                         "YEL.B.HLin","GRN.B.HLin","BS4BS5.Indicator")]
+        return(a)
+      }
+  },simplify = F)
+  counter <<- 0
+   return(expr_mat)
+ })
+
+Invasion_data <- data.frame()
+for(i in 1:length(invasion)){
+  registerDoParallel(cl)
+  dd <- foreach(j = 1:length(invasion[[i]]),.combine="rbind") %dopar% {
+      a <- as.data.frame(invasion[[i]][[j]])
+      bs <- data.frame(a,
+                Species=rep(stringr::str_split(pnames[[j]],"_")[[1]][[2]],dim(a)[[1]]),
+                Treatment=rep(stringr::str_split(pnames[[j]],"_")[[1]][[3]],dim(a)[[1]]),
+                Replicate=as.numeric(rep(stringr::str_split(pnames[[j]],"_")[[1]][[4]],dim(a)[[1]])),
+                Time=rep(unique(debris_count_invasion_data$Time)[[i]],dim(a)[[1]]),
+                id=rep(pnames[[j]],dim(a)[[1]]) )
+      return(bs)
+  }
+ stopImplicitCluster()
+ Invasion_data <- rbind(Invasion_data,dd)
+}
+rm(dd)
+
+Invasion_data$Treatment <- as.character(Invasion_data$Treatment)
+Invasion_data$Treatment[Invasion_data$Treatment=="Control"] <- "0"
+
+debris_count_invasion_data2 <- debris_count_invasion_data %>%
+                          dplyr::select(BS4Abundance,BS5Abundance,Dilution,Time,Treatment,
+                                        Resident_Species,Replicate) %>%
+                         rename(Species=Resident_Species) %>% 
+  gather(key="AbundanceID",value="CyanoAbundance",BS4Abundance,BS5Abundance) 
+
+debris_count_invasion_data2 <- debris_count_invasion_data2 %>% 
+  mutate(AbundanceID=if_else(debris_count_invasion_data2$AbundanceID=="BS4Abundance",1,0))
+
+Invasion_data <- merge(Invasion_data,debris_count_invasion_data2,
+                         by=intersect(names(debris_count_invasion_data2),names(Invasion_data)))
+Invasion_data <- Invasion_data %>% mutate(Tsp=rep(1,nrow(Invasion_data)))
+rm(debris_count_invasion_data2,mono,invasion)
+###combining both invasiona dn monculture data together
+Traits_Data <- rbind(Monoculture_data,Invasion_data)
+#Traits_Data <- Traits_Data %>% mutate(Tsp=if_else(Time < 41,0,1))
+rm(Monoculture_data,Invasion_data)
+
+Traits_Data <- Traits_Data %>%
+  dplyr::select(id,FSC.HLin:GRN.B.HLin,Time,Tsp,Treatment,Species,BS4BS5.Indicator,
+                                     CyanoAbundance,AbundanceID,Dilution,Replicate)
+Traits_Data2 <- Traits_Data %>% 
+  mutate(Species.E=if_else(Traits_Data$Species=="4" & Traits_Data$BS4BS5.Indicator==1 &
+                             Traits_Data$Tsp==1,1,
+                    if_else(Traits_Data$Species=="4" & Traits_Data$BS4BS5.Indicator==1 & 
+                              Traits_Data$Tsp==0,2,
+                    if_else(Traits_Data$Species=="4" & Traits_Data$BS4BS5.Indicator==0 &
+                             Traits_Data$Tsp==1,3,
+                            if_else(Traits_Data$Species=="5" & Traits_Data$BS4BS5.Indicator==0 &
+                             Traits_Data$Tsp==0,4,
+                             if_else(Traits_Data$Species=="5" & Traits_Data$BS4BS5.Indicator==0 &
+                             Traits_Data$Tsp==1,5,6))
+                                ))))
+rm(Traits_Data)
+Traits_Data2 <- Traits_Data2 %>% mutate(Abundance.E=if_else(Traits_Data2$Species.E==1 &
+                                                            Traits_Data2$AbundanceID==0,1,
+                                                    if_else(Traits_Data2$Species.E==1 &
+                                                            Traits_Data2$AbundanceID==1,2,
+                                                    if_else(Traits_Data2$Species.E==2 &
+                                                            Traits_Data2$AbundanceID==1,3,
+                                                    if_else(Traits_Data2$Species.E==3 &
+                                                            Traits_Data2$AbundanceID==0,4,
+                                                    if_else(Traits_Data2$Species.E==3 &
+                                                            Traits_Data2$AbundanceID==1,5,
+                                                    if_else(Traits_Data2$Species.E==4 &
+                                                            Traits_Data2$AbundanceID==0,6,
+                                                    if_else(Traits_Data2$Species.E==5 &
+                                                            Traits_Data2$AbundanceID==0,7,
+                                                    if_else(Traits_Data2$Species.E==5 &
+                                                            Traits_Data2$AbundanceID==1,8,
+                                                    if_else(Traits_Data2$Species.E==6 &
+                                                            Traits_Data2$AbundanceID==0,9,10))))))))))
+
+Traits_Data2 <- Traits_Data2 %>% mutate(Time.f=factor(Traits_Data2$Time),
+                                      Treatment.f=factor(Traits_Data2$Treatment,
+                                                         unique(Traits_Data2$Treatment)[c(1,4,6,2,3,5)]),
+                                      Species.f=factor(Traits_Data2$Species.E),
+                                      Dilution.f=factor(Traits_Data2$Dilution),
+                                      Abundance.f=factor(Traits_Data2$Abundance.E)
+                                      )
+
+Traits_Data2 <- Traits_Data2 %>% dplyr::select(-Species,-BS4BS5.Indicator,-AbundanceID)
+write.csv(Traits_Data2,"Traits_Data.csv",row.names=F)
+```
+
+##  Univariate Models with Abudance as a Covariate and Time as a Factor
+### Saturated Model (Mean and Variance Modelled as function of Covariates)
+
+```{r}
+#test
+test <- gamlss(FSC.HLin~Time*Tsp+factor(Species.E)*Tsp,data=Traits_Data,
+        sigma.formula=~Time*Tsp+factor(Species.E)*Tsp,family=NO(sigma.link="identity"))
+#Forward Scatter
+mu_frm <- formula(FSC.HLin~Treatment.f+Specie.f:BS4BS5.Indicator+Dilution.f+
+                  Time.f+log(BS4Abundance)+log(BS5Abundance) +
+                  Treatment:Species:BS4BS5.Indicator+
+                  Treatment:factor(Time)  )
+sat_model <- nlme::gls(model=mu_frm,method="ML",data=Traits_Data)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+####  AR(1) Model Graphs
+
+```{r}
+####reading in the data we need
+AbundancePredicted_Mono <- read_csv("AbundancePredicted_Mono.csv")
+AbundancePredicted_Joint_Mono <- read_csv("AbundancePredicted_Joint_Mono.csv")
+TopPredicted_Mono <- read_csv("TopPredicted_Mono.csv")
+TopPredicted_joint_Mono <- read_csv("TopPredicted_joint_Mono.csv")
+AbundancePredicted_Invasion <- read_csv("AbundancePredicted_Invasion.csv")
+AbundancePredicted_joint_Invasion <- read_csv("AbundancePredicted_joint_Invasion.csv")
+TopPredicted_Invasion <- read_csv("TopPredicted_Invasion.csv")
+TopPredicted_joint_Invasion <- read_csv("TopPredicted_joint_Invasion.csv")
+AbundancePredicted_combined <- read_csv("AbundancePredicted_combined.csv")
+TopPredicted_Combined <- read_csv("TopPredicted_Combined.csv")
+AbundancePredict_Joint_Combined <- read_csv("AbundancePredict_Joint_Combined.csv")
+TopPredicted_Joint_Combined <- read_csv("TopPredicted_Joint_Combined.csv")
+
+###Predicted Abundance Monoculture from Alone and Joint Model using Monoculture data
+AbundancePredicted_Mono %>% dplyr::filter(Treatment %in% c(0,100,400)) %>% ggplot(aes(x=Time,group=factor(Treatment),color=factor(Treatment))) + geom_point(aes(y=log(Abundance))) + facet_grid(Replicate~Species) + theme_bw() + ggtitle("Monoculture Abundance") + geom_line(aes(y=Pred)) +
+  geom_line(aes(x=Time,y=Pred),
+            data=AbundancePredicted_Joint_Mono%>% dplyr::filter(Treatment %in% c(0,100,400)) ,linetype="dashed")
+
+
+### TOPS Monoculture
+TopPredicted_Mono %>% dplyr::filter(Treatment %in% c(0,100,400)) %>% ggplot(aes(x=Time,group=factor(Treatment),color=factor(Treatment))) + geom_point(aes(y=log(TOPS+1))) + facet_grid(Replicate~Species) + theme_bw() + ggtitle("Monoculture TOPS") + geom_line(aes(y=Pred)) +
+  geom_line(aes(x=Time,y=Pred),
+            data=TopPredicted_joint_Mono %>% dplyr::filter(Treatment %in% c(0,100,400)) ,linetype="dashed")
+
+###Predicted Abundance Invasion from Alone and Joint Model using Invasion Data
+
+#first geom point and geom line refers to BS4s and the second refers to BS5s
+AbundancePredicted_Invasion %>% dplyr::filter(Treatment %in% c(0,100,400)) %>% ggplot(aes(x=Time,group=factor(Treatment),color=factor(Treatment))) + 
+  geom_point(aes(y=log(Abundance)),
+             data=AbundancePredicted_Invasion %>% 
+             dplyr::filter((Resident_Species==4&Spp==1) | (Resident_Species==5&Spp==1)) %>%
+             dplyr::filter(Treatment %in% c(0,100,400)),size=1.5 ) +
+  geom_line(aes(y=Pred),
+             data=AbundancePredicted_Invasion %>% 
+             dplyr::filter((Resident_Species==4&Spp==1) | (Resident_Species==5&Spp==1)) %>% 
+             dplyr::filter(Treatment %in% c(0,100,400)) ) + facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("Invasion Abundance without Joint Model") + 
+  geom_point(aes(y=log(Abundance)),
+             data=AbundancePredicted_Invasion %>% 
+             dplyr::filter((Resident_Species==4&Spp==2) | (Resident_Species==5&Spp==2)) %>%
+             dplyr::filter(Treatment %in% c(0,100,400)),size=2.5 ) + 
+  geom_line(aes(y=Pred),
+             data=AbundancePredicted_Invasion %>% 
+             dplyr::filter((Resident_Species==4&Spp==2) | (Resident_Species==5&Spp==2)) %>% 
+             dplyr::filter(Treatment %in% c(0,100,400)),linetype="dashed" )
+
+#first geom point and geom line refers to BS4s and the second refers to BS5s
+AbundancePredicted_joint_Invasion %>% dplyr::filter(Treatment %in% c(0,400)) %>% ggplot(aes(x=Time,group=factor(Treatment),color=factor(Treatment))) + 
+  geom_point(aes(y=log(Abundance)),
+             data=AbundancePredicted_joint_Invasion %>% 
+             dplyr::filter((Resident_Species==4&Spp==1) | (Resident_Species==5&Spp==1)) %>%
+             dplyr::filter(Treatment %in% c(0,400)),size=1.5 ) +
+  geom_line(aes(y=Pred),
+             data=AbundancePredicted_joint_Invasion %>% 
+             dplyr::filter((Resident_Species==4&Spp==1) | (Resident_Species==5&Spp==1)) %>% 
+             dplyr::filter(Treatment %in% c(0,400)) ) + facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("Invasion Abundance with Joint Model") + 
+  geom_point(aes(y=log(Abundance)),
+             data=AbundancePredicted_joint_Invasion %>% 
+             dplyr::filter((Resident_Species==4&Spp==2) | (Resident_Species==5&Spp==2)) %>%
+             dplyr::filter(Treatment %in% c(0,400)),size=2.5 ) + 
+  geom_line(aes(y=Pred),
+             data=AbundancePredicted_joint_Invasion %>% 
+             dplyr::filter((Resident_Species==4&Spp==2) | (Resident_Species==5&Spp==2)) %>% 
+             dplyr::filter(Treatment %in% c(0,400)),linetype="dashed" )
+
+###TOPS for the Invasion period
+TopPredicted_Invasion %>% dplyr::filter(Treatment %in% c(0,400)) %>% ggplot(aes(x=Time,group=factor(Treatment),color=factor(Treatment))) + facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("Invasion TOP without Joint Model") + 
+  geom_point(aes(y=log(TOPS+1)),
+             data=TopPredicted_Invasion %>% 
+             dplyr::filter((Resident_Species==4&Spp==1) | (Resident_Species==5&Spp==1)) %>%
+             dplyr::filter(Treatment %in% c(0,400)),size=1.5 ) +
+  geom_line(aes(y=Pred),
+             data=TopPredicted_Invasion %>% 
+             dplyr::filter((Resident_Species==4&Spp==1) | (Resident_Species==5&Spp==1)) %>% 
+             dplyr::filter(Treatment %in% c(0,400)) )  + 
+  geom_point(aes(y=log(TOPS+1)),
+             data=TopPredicted_Invasion %>% 
+             dplyr::filter((Resident_Species==4&Spp==2) | (Resident_Species==5&Spp==2)) %>%
+             dplyr::filter(Treatment %in% c(0,400)),size=2.5 ) + 
+  geom_line(aes(y=Pred),
+             data=TopPredicted_Invasion %>% 
+             dplyr::filter((Resident_Species==4&Spp==2) | (Resident_Species==5&Spp==2)) %>% 
+             dplyr::filter(Treatment %in% c(0,400)),linetype="dashed" )
+
+#from the joint model
+TopPredicted_joint_Invasion %>% dplyr::filter(Treatment %in% c(0,100,400)) %>% ggplot(aes(x=Time,group=factor(Treatment),color=factor(Treatment))) + facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("Invasion TOP with Joint Model") + 
+  geom_point(aes(y=log(TOPS+1)),
+             data=TopPredicted_joint_Invasion %>% 
+             dplyr::filter((Resident_Species==4&Spp==1) | (Resident_Species==5&Spp==1)) %>%
+             dplyr::filter(Treatment %in% c(0,400)),size=1.5 ) +
+  geom_line(aes(y=Pred),
+             data=TopPredicted_joint_Invasion %>% 
+             dplyr::filter((Resident_Species==4&Spp==1) | (Resident_Species==5&Spp==1)) %>% 
+             dplyr::filter(Treatment %in% c(0,400)) )  + 
+  geom_point(aes(y=log(TOPS+1)),
+             data=TopPredicted_joint_Invasion %>% 
+             dplyr::filter((Resident_Species==4&Spp==2) | (Resident_Species==5&Spp==2)) %>%
+             dplyr::filter(Treatment %in% c(0,400)),size=2.5 ) + 
+  geom_line(aes(y=Pred),
+             data=TopPredicted_joint_Invasion %>% 
+             dplyr::filter((Resident_Species==4&Spp==2) | (Resident_Species==5&Spp==2)) %>% 
+             dplyr::filter(Treatment %in% c(0,400)),linetype="dashed" )
+
+#######Using combined data
+#Abundance
+AbundancePredicted_combined %>% dplyr::filter(Treatment %in% c(0,400)) %>% ggplot(aes(x=Time,group=factor(Treatment),color=factor(Treatment))) +
+  geom_point(aes(y=log(Abundance)),
+             data=AbundancePredicted_combined %>% 
+             dplyr::filter((Resident_Species==4&Invader==0) | (Resident_Species==5&Invader==1)) %>%
+             dplyr::filter(Treatment %in% c(0,400)),size=1.5 ) +
+  geom_line(aes(y=Pred),
+             data=AbundancePredicted_combined %>% 
+             dplyr::filter((Resident_Species==4&Invader==0) | (Resident_Species==5&Invader==1)) %>%
+             dplyr::filter(Treatment %in% c(0,100,400)) ) + 
+  geom_point(aes(y=log(Abundance)),
+             data=AbundancePredicted_combined %>% 
+             dplyr::filter((Resident_Species==4&Invader==1) | (Resident_Species==5&Invader==0)) %>%
+             dplyr::filter(Treatment %in% c(0,400)),size=2.5 ) + 
+  geom_line(aes(y=Pred),
+             data=AbundancePredicted_combined %>% 
+             dplyr::filter((Resident_Species==4&Invader==1) | (Resident_Species==5&Invader==0)) %>% 
+             dplyr::filter(Treatment %in% c(0,400)),linetype="dashed" ) + facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("Abundance in Full with No Joint Model")
+
+#TOP
+TopPredicted_Combined %>% dplyr::filter(Treatment %in% c(0,400)) %>% ggplot(aes(x=Time,group=factor(Treatment),color=factor(Treatment))) +
+  geom_point(aes(y=log(TOPS+1)),
+             data=TopPredicted_Combined %>% 
+             dplyr::filter((Resident_Species==4&Invader==0) | (Resident_Species==5&Invader==1)) %>%
+             dplyr::filter(Treatment %in% c(0,400)),size=1.5 ) +
+  geom_line(aes(y=Pred),
+             data=TopPredicted_Combined %>% 
+             dplyr::filter((Resident_Species==4&Invader==0) | (Resident_Species==5&Invader==1)) %>%
+             dplyr::filter(Treatment %in% c(0,400)) ) + 
+  geom_point(aes(y=log(TOPS+1)),
+             data=TopPredicted_Combined %>% 
+             dplyr::filter((Resident_Species==4&Invader==1) | (Resident_Species==5&Invader==0)) %>%
+             dplyr::filter(Treatment %in% c(0,400)),size=2.5 ) + 
+  geom_line(aes(y=Pred),
+             data=TopPredicted_Combined %>% 
+             dplyr::filter((Resident_Species==4&Invader==1) | (Resident_Species==5&Invader==0)) %>% 
+             dplyr::filter(Treatment %in% c(0,400)),linetype="dashed" ) + facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("TOP in Full With No Joint Model")
+
+##Joint Combined
+#Abundance
+AbundancePredict_Joint_Combined %>% dplyr::filter(Treatment %in% c(0,400)) %>% ggplot(aes(x=Time,group=factor(Treatment),color=factor(Treatment))) +
+  geom_point(aes(y=log(Abundance)),
+             data=AbundancePredict_Joint_Combined %>% 
+             dplyr::filter((Resident_Species==4&Invader==0) | (Resident_Species==5&Invader==1)) %>%
+             dplyr::filter(Treatment %in% c(0,400)),size=1.5 ) +
+  geom_line(aes(y=Pred),
+             data=AbundancePredict_Joint_Combined %>% 
+             dplyr::filter((Resident_Species==4&Invader==0) | (Resident_Species==5&Invader==1)) %>%
+             dplyr::filter(Treatment %in% c(0,400)) ) + 
+  geom_point(aes(y=log(Abundance)),
+             data=AbundancePredict_Joint_Combined %>% 
+             dplyr::filter((Resident_Species==4&Invader==1) | (Resident_Species==5&Invader==0)) %>%
+             dplyr::filter(Treatment %in% c(0,400)),size=2.5 ) + 
+  geom_line(aes(y=Pred),
+             data=AbundancePredict_Joint_Combined %>% 
+             dplyr::filter((Resident_Species==4&Invader==1) | (Resident_Species==5&Invader==0)) %>% 
+             dplyr::filter(Treatment %in% c(0,400)),linetype="dashed" ) + facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("Abundance with FullData and Joint Model")
+
+#TOP
+TopPredicted_Joint_Combined %>% dplyr::filter(Treatment %in% c(0,400)) %>% ggplot(aes(x=Time,group=factor(Treatment),color=factor(Treatment))) +
+  geom_point(aes(y=log(TOPS+1)),
+             data=TopPredicted_Joint_Combined %>% 
+             dplyr::filter((Resident_Species==4&Invader==0) | (Resident_Species==5&Invader==1)) %>%
+             dplyr::filter(Treatment %in% c(0,400)),size=1.5 ) +
+  geom_line(aes(y=Pred),
+             data=TopPredicted_Joint_Combined %>% 
+             dplyr::filter((Resident_Species==4&Invader==0) | (Resident_Species==5&Invader==1)) %>%
+             dplyr::filter(Treatment %in% c(0,400)) ) + 
+  geom_point(aes(y=log(TOPS+1)),
+             data=TopPredicted_Joint_Combined %>% 
+             dplyr::filter((Resident_Species==4&Invader==1) | (Resident_Species==5&Invader==0)) %>%
+             dplyr::filter(Treatment %in% c(0,400)),size=2.5 ) + 
+  geom_line(aes(y=Pred),
+             data=TopPredicted_Joint_Combined %>% 
+             dplyr::filter((Resident_Species==4&Invader==1) | (Resident_Species==5&Invader==0)) %>% 
+             dplyr::filter(Treatment %in% c(0,400)),linetype="dashed" ) + facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("TOP With Full Data and Joint Model")
+```
+
+### Exploring TOP
+
+```{r}
+TOPS_combined2 %>% group_by(Time, Replicate) %>% summarise(AVETOP= mean(log(TOPS+1),na.rm=T)) %>% 
+                   ggplot(aes(x=Time,y=AVETOP)) + geom_point() + geom_line() + theme_bw() + 
+                   ggtitle("Average Evolution of TOP") + labs(x="Time", y="Mean") +
+                   facet_grid(Replicate~.)
+
+#Species Effect                    
+TOPS_combined2 %>% group_by(Time, Replicate, Resident_Species) %>% 
+                   summarise(AVETOP= mean(log(TOPS+1),na.rm=T)) %>% 
+                   ggplot(aes(x=Time,y=AVETOP)) + geom_point() + 
+                   geom_line() + theme_bw() + facet_grid(Replicate~Resident_Species) +
+                   ggtitle("Average Evolution of TOP") + labs(x="Time", y="Mean")
+
+TOPS_combined2 %>% group_by(Time, Replicate, Resident_Species, Treatment) %>% 
+                   summarise(AVETOP= mean(log(TOPS+1),na.rm=T)) %>% 
+                   ggplot(aes(x=Time,y=AVETOP, color=factor(Treatment) )) + geom_point() + 
+                   geom_line() + theme_bw() + facet_grid(Replicate~Resident_Species) +
+                   ggtitle("Average Evolution of TOP") + labs(x="Time", y="Mean")
+
+testd <- data_monoculture %>% dplyr::mutate(test = log(CyanoAbundance)) %>% 
+  dplyr::group_by(Species, Treatment, Replicate) %>% nest() 
+testd$Diffs <- map(testd$data, function(.y) {
+  Velocity <- diff(.y$test)/ diff(.y$Time2)
+  Acceleration <- diff(diff(.y$test)) / diff(diff(.y$Time2))
+  return(list(Velocity = Velocity, Acceleration = Acceleration))
+})
+testd$Velocity <- map(testd$Diffs, function(x) x$Velocity)
+testd$Acceleration <- map(testd$Diffs, function(x) x$Acceleration)
+```
+
+
+
+
+
+
+
+
 

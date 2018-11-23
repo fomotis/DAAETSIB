@@ -1,0 +1,907 @@
+---
+title: "Modelling TOP and TED"
+author: "Olusoji Oluwafemi Daniel et al"
+date: "25 April 2018"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(nlme)
+library(deSolve)
+library(FME)
+library(minpack.lm)
+#library(numDeriv)
+knitr::opts_chunk$set(echo = TRUE)
+
+Monoculture_data_wide <- read_csv("Data/Monoculture_TOP_wide.csv",col_types=cols(
+  TOP_BS4 = col_double(),
+  TOP_BS5 = col_double(),
+  Time = col_integer(),
+  Treatment = col_integer(),
+  Resident_Species = col_integer(),
+  Replicate = col_integer(),
+  BS4Abundance = col_double(),
+  BS5Abundance = col_double(),
+  TOPS_4_1 = col_double(),
+  Abundance_4_1 = col_double(),
+  TOPS_5_1 = col_double(),
+  Abundance_5_1 = col_double()
+))
+Invasion_data_wide <- read_csv("Data/Invasion_TOP_wide.csv",col_types=cols(
+  TOP_BS4 = col_double(),
+  TOP_BS5 = col_double(),
+  Time = col_integer(),
+  Treatment = col_integer(),
+  Resident_Species = col_integer(),
+  Replicate = col_integer(),
+  BS4Abundance = col_double(),
+  BS5Abundance = col_double(),
+  TOPS_4_1 = col_double(),
+  Abundance_4_1 = col_double(),
+  TOPS_5_1 = col_double(),
+  Abundance_5_1 = col_double()
+))
+ND <- Monoculture_data_wide[19:108,] %>% filter(Treatment=="400")
+#ND <- ND %>% mutate(outlier=ifelse((log(ND$TOPS_4+1)>7) & (log(ND$Abundance_4)<8),1,0))
+#Abundance as y
+#ND %>% ggplot(aes(x=log(TOPS_4_1+1),color=factor(outlier))) + geom_point(aes(y=log(Abundance_4))) + theme_bw() + ggtitle("Abundance vs TOPS_1 (BS4,Atrazine = 400)")
+
+#ND %>% ggplot(aes(x=log(Abundance_4_1),color=factor(outlier))) + geom_point(aes(y=log(Abundance_4))) + theme_bw() + ggtitle("Abundance vs Abundance_1 (BS4,Atrazine = 400)")
+
+#TOP as y
+#ND %>% ggplot(aes(x=log(TOPS_4_1+1),color=factor(outlier))) + geom_point(aes(y=log(TOPS_4+1))) + theme_bw() + ggtitle("TOPS vs TOPS_1 (BS4,Atrazine = 400)")
+
+#ND %>% ggplot(aes(x=log(Abundance_4_1),color=factor(outlier))) + geom_point(aes(y=log(TOPS_4+1))) + theme_bw() + ggtitle("TOPS vs Abundance_1 (BS4,Atrazine = 400)")
+
+#ND$TOPS_4[1:3] <- exp(ND$pred_TOP4_mod1[1:3])
+
+#reading in the long dataset
+Monoculture_data_long <- read_csv("Data/Monoculture_data_long.csv", 
+     col_types = cols(Abundance_4_1 = col_double(), 
+         Abundance_5_1 = col_double(), TOPS_4_1 = col_double(), 
+         TOPS_5_1 = col_double(),Resp=col_double(),Resp2=col_double()))
+
+Invasion_data_long <- read_csv("Data/Invasion_data_long.csv", 
+     col_types = cols(Abundance_4_1 = col_double(), 
+         Abundance_5_1 = col_double(), TOPS_4_1 = col_double(), 
+         TOPS_5_1 = col_double(),Resp=col_double(),Resp2=col_double()))
+
+#Jurg's Data
+data_monoculture <- read_csv("Data/data,monoculture.csv", col_types = 
+                              cols( Time = col_integer(), Treatment = col_character(),
+                                    `BS4; 1` = col_double(), `BS4; 2` = col_double(),
+                                    `BS4; 3` = col_double(), `BS5; 1` = col_double(),
+                                    `BS5; 2` = col_double(), `BS5; 3` = col_double() ))
+
+#
+data_monoculture <- read_csv("Data/Abundance_Monoculture.csv", col_types = 
+               cols(
+  FileName = col_character(),
+  Species = col_integer(),
+  Treatment = col_integer(),
+  Dilution = col_integer(),
+  Time = col_date(format = ""),
+  Replicate = col_integer(),
+  CPML = col_double(),
+  CyanoCount = col_integer(),
+  DebrisCount = col_integer(),
+  ParticleCount = col_integer(),
+  OtherCount = col_integer(),
+  MarginCount = col_integer(),
+  FParticleCount = col_integer(),
+  OParticleCount = col_integer(),
+  CyanoAbundance = col_number(),
+  Time2 = col_integer()
+))
+```
+
+## Full Model
+
+```{r}
+#The differential equation (Lotka - Voltera, Jurg's form)
+ltk1 <- function (Time, abd, parms, ...) {
+    mu <- parms$mu
+    A <- parms$A
+    #mu =  inherent growth per-capita
+    #A = ratio of mu and carrying capacity
+    dABD <- (mu - A * abd) * abd
+    list(dABD)
+}
+```
+
+### Treatment = 400
+
+```{r}
+#data preprocessing
+abd_400 <- data_monoculture %>% 
+  dplyr::mutate(L_Abundance = log(CyanoAbundance)) %>% 
+  dplyr::select(time = Time2, Treatment, Species, Replicate, L_Abundance) %>% 
+  group_by(Species, Replicate, Treatment) %>% nest()
+
+titles <- paste0("BS", abd_400$Species, "_", abd_400$Treatment, "_", abd_400$Replicate)
+##  Lotka-Voltera
+#times
+abd_400$Fit <- map2(.x = abd_400$data, .y = titles, function(.x, .y) {
+  dd <- as.data.frame(.x)
+  #removing rows with NAs
+  dd <- dd[is.na(dd$L_Abundance) == F, ]
+  
+  times_obs <- dd$time
+  times <- sort(unique(c(seq(2, 60, length = 100), times_obs)))
+  # the data
+  y <- as.data.frame(dd$L_Abundance) ; names(y) <- "L_Abundance"
+  plot1 <- cbind(Time = times_obs, L_Abundance = y) %>% 
+      ggplot(aes(x = Time, y = L_Abundance)) + 
+      geom_point(colour = 1, shape = 19, size = 3) + geom_line() + theme_minimal()
+  # first observation in the data
+  y0 <- y[1, ]
+  #initial parameter guess
+  PCGR <- sapply(1:NROW(y), function(i, x, y) {
+    if(i == NROW(y) | x[i, ] == 0) return(NA)
+      pcgr <- ((x[i + 1, ] - x[i, ]) / x[i, ]) / (y[i + 1] - y[i])
+      #pcgr7 <- pcgr / 7
+    return(pcgr)
+  }, x = y, y = times_obs)
+  #initial values for parameters
+  parms <- c(mu = max(PCGR, na.rm = T), A = max(PCGR, na.rm = T) / max(y))
+  out1 <- ode(y = y0, times = times, func = ltk1, parms = list(A = parms[2], mu = parms[1]))
+  out1 <- as.data.frame(out1)
+  names(out1) <- c("time", "y")
+  #plotting
+  #plot1 <- plot1 + geom_line(data = out1, aes(x = time, y = y), 
+  #                            linetype = 2, colour = "black", size = 1) 
+  #residual from the ODE start
+  ss2a <- function(parms) {
+    #parameters
+    A <- parms[2]
+    mu <- parms[1]
+    # 
+    out1 <- deSolve::ode(y = y0, times = times, func = ltk1, parms = list(A = A, mu = mu))
+    #filtering out the observed data
+    out1_df <- as.data.frame(out1)
+    names(out1_df) <- c("time", "y")
+    #filtering predicted data for observed time point
+    out1_df <- out1_df[out1_df$time %in% times_obs, ]
+    #residual
+    as.numeric(out1_df$y - y[, 1])
+  }
+  ## non-linear leasy squares minimization
+  de_model <- minpack.lm::nls.lm(par = parms, fn = ss2a)
+  de_model_summary <- summary(de_model)
+  
+  Sig_ode <- de_model_summary$sigma
+  
+  #predictions based on the estimated parameters from Non-Linear Least Squares
+  out_ode <- deSolve::ode(y = y0, times = times_obs, func = ltk1, 
+                          parms = list(A = coef(de_model)[2], 
+                                       mu = coef(de_model)[1]))
+  out_ode_df <- as.data.frame(out_ode); names(out_ode_df) <- c("time", "y")
+  
+  #computing loglikelihood at the parameter estimates (assuming normally distributed errors)
+  ll_ode <- -2*sum(dnorm(y[2:nrow(y), ], out_ode_df$y[2:nrow(y)] , 
+                         sd = Sig_ode, log = T))
+  AIC_ode <- (ll_ode) + ((length(coef(de_model)) + 1) *2)
+  
+  ode_perf <- data.frame(Sig = Sig_ode, loglike = ll_ode, AIC = AIC_ode)
+  ode_reults <- data.frame(Est = de_model_summary$coefficients[, 1], 
+             SE = de_model_summary$coefficients[, 2])
+  
+  plot1 <- plot1 + geom_line(data = out_ode_df, aes(x = time, y = y), 
+                          linetype = 2, colour = "green", size = 1)  + 
+    labs(x = "Time", y = "Log-Abundance") + ggtitle(paste0("File = ", .y)) + 
+    theme(plot.title = element_text(hjust = 0.5)) 
+  
+  #AR-1
+  #y_1 <- dplyr::lag(y[ ,1], n = 1)
+  #out_ar1 <- data.frame(y = y[ , 1], y_1 = y_1) %>% 
+  #  nlme::gls(y ~ y_1, data = ., method = "ML", na.action = na.omit)
+  #extracting fitted values
+  #out_ar1_df <- data.frame(Time = times_obs, y = c(NA, out_ar1$fitted))
+  #extracting parameter estimates
+  #out_ar1_summary <- summary(out_ar1)
+  #a_est <- paste0(round(out_ar1_summary$tTable[1, 1], 2), "(", 
+  #       signif(out_ar1_summary$tTable[1, 2], 1), ")")
+  #b_est <- paste0(round(out_ar1_summary$tTable[2, 1], 2), "(", 
+  #       signif(out_ar1_summary$tTable[2, 2], 1), ")")
+  #Sig_ar1 <- out_ar1_summary$sigma
+  
+  #ar1_perf <- data.frame(Sig = Sig_ar1, loglike = -2*logLik(out_ar1), AIC = AIC(out_ar1))
+  #ar1_results <- data.frame(Est = out_ar1_summary$tTable[, 1], 
+  #           SE = out_ar1_summary$tTable[, 2])
+  
+  #plot1 <- plot1 + geom_line(data = out_ar1_df, aes(x = Time, y = y),
+  #                           linetype = 2, colour = "blue", size = 1)  + 
+  #  scale_linetype_manual(name = "Model Type", labels = c("Initial", "NLS", "AR-1"), 
+  #                        values = c("dashed", "dashed", "dashed")) + 
+  #  scale_color_manual(name = "Model Type", values = c("Initial" = "red", 
+  #                                                  "NLS" = "green",
+  #                                                  "AR-1" = "blue"), 
+  #                     labels = c("Initial", "NLS", "AR-1"))
+  print(plot1)
+  results <- list(Performance = ode_perf, 
+                  Estimates = data.frame(Parameter = c("mu", "A"), ode_reults)
+                 )
+  return(results)
+  
+} )
+#Estimates
+abd_400$Estimates <- map(.x = abd_400$Fit, function(.x) {
+  return(.x$Estimates)
+})
+#Performance
+abd_400$Performance <- map(.x = abd_400$Fit, function(.x) {
+  return(.x$Performance)
+})
+
+plotdata1 <- abd_400 %>% unnest(Estimates)
+#parameter estimates plus standard error
+map(unique(plotdata1$Parameter), function(.x) {
+  plotdata1 %>% dplyr::filter(Parameter == .x) %>% ggplot(aes(x = Treatment, y = Est, group = 1)) + 
+  geom_point(shape = 19, colour = "#999999") + geom_line(colour = "#999999") +
+  geom_errorbar(aes(ymin = Est - SE, ymax = Est + SE), width = 0.2,
+                     position = position_dodge(0.05), size = 1, colour = "#999999") + 
+  facet_grid(Replicate ~ Species) +
+  theme_minimal() + labs(x = "Treatment", y = "Estimates") + 
+  ggtitle(paste0("Parameter = ", .x)) + 
+  theme(plot.title = element_text(hjust = 0.5))
+})
+
+performance_data <- abd_400 %>% unnest(Performance)
+#sigma
+performance_data %>% ggplot(aes(x = Treatment, y = Sig, group = 1)) + geom_point() + 
+  geom_line() + theme_minimal() + facet_grid(Replicate ~ Species) + 
+  labs(x = "Treatment", y = expression(sigma)) + ggtitle("Sigma") + 
+  theme(plot.title = element_text(hjust = 0.5))
+#loglikelihood
+performance_data %>% ggplot(aes(x = Treatment, y = loglike, group = Model,
+                                colour = Model)) + geom_point() + geom_line() +
+  theme_minimal() + facet_grid(Replicate ~ Species) + 
+  labs(x = "Treatment", y = "-2logLikelihood")
+#AIC
+performance_data %>% ggplot(aes(x = Treatment, y = AIC, group = Model,
+                                colour = Model)) + geom_point() + geom_line() +
+  theme_minimal() + facet_grid(Replicate ~ Species) + 
+  labs(x = "Treatment", y = "AIC")
+```
+
+
+##  Univariate AR(1) Models for TOP and Density
+
+### Monoculture Time Period
+
+### Abundance Only Models
+
+```{r}
+Abundance_data <- read_csv("Data/Abundance_Monoculture.csv",
+                           col_types=cols(
+  CyanoCount = col_integer(),
+  DebrisCount = col_integer(),
+  ParticleCount = col_integer(),
+  CPML = col_double(),
+  FileName = col_character(),
+  Time = col_date(format = ""),
+  Treatment = col_integer(),
+  Species = col_integer(),
+  Dilution = col_integer(),
+  CyanoAbundance = col_double(),
+  Replicate = col_character(),
+  Ind = col_integer()
+)) 
+Abundance_data2  <- data.table::dcast(data.table::setDT(Abundance_data %>% filter(Time > "2017-03-31")),
+                                           Time+Treatment+Replicate~Species,
+                 value.var="CyanoAbundance") %>% dplyr::rename(Abundance_4 = `4`, 
+                                                               Abundance_5 = `5`) %>% 
+    group_by(Treatment,Replicate) %>% 
+    dplyr::mutate( Abundance_4_1 = lag(Abundance_4, 1), 
+                   Abundance_5_1 = lag(Abundance_5, 1))
+
+Abundance_data <- data.table::melt(data.table::setDT(Abundance_data2),id.vars=c(1:3,6:7),
+                         measure.vars=c(4,5),value.name="Resp",
+                         variable.name="Ind",variable.factor=F) %>% 
+  mutate(Ind2 = if_else(Ind == "Abundance_4",1,2), 
+         Ind3 = if_else(Ind == "Abundance_4",1,0),
+         Ind4 = if_else(Ind == "Abundance_5",1,0),
+          SampID = rep(1:108, times=2) ) %>% group_by(Treatment) %>% nest()
+
+Abundance_model <- function(x){
+  nlme::gls(log(Resp)~-1+as.factor(Ind2)+log(Abundance_4_1):Ind3+log(Abundance_5_1):Ind4,
+          data=x,
+          correlation = nlme::corSymm(form = ~Ind2|SampID),
+          weights=nlme::varIdent(form = ~1|Ind2),
+          na.action = na.omit, method = "ML")
+}
+
+Abundance_data <- Abundance_data %>% mutate(Models = map(Abundance_data$data, Abundance_model)) 
+
+Abundance_data <- Abundance_data  %>% mutate(Residuals=map(Abundance_data$Models,residuals)) %>% 
+                  mutate(ll2=map(Abundance_data$Models,function(x){-2*logLik(x)})) %>%    
+                  mutate(AIC=map(Abundance_data$Models,function(x){AIC(x)})) %>% 
+                  mutate(Pred = map(Abundance_data$Models,function(x){predict(x)})) %>% 
+                  mutate(SErrors = map(Abundance_data$Models,
+                                       function(x){unique(attr(residuals(x),"std"))})) %>%
+                  mutate(Adj.Corr = map(Abundance_data$Models,function(x){ 
+                                        y <- nlme::corMatrix(x$modelStruct$corStruct)[[1]]
+                                        y[upper.tri(y)] })) %>% 
+                  mutate(Stable = map(Abundance_data$Models,function(x){
+                         summary(x)$tTable[,c(1,2,4)] })) 
+
+plotdata <- map2(Abundance_data$Treatment,Abundance_data$Stable,function(.x,.y){
+  d <- .y[,1:2]
+  return(cbind(.x,d))
+})
+
+params <- c(expression(hat(a)[n[BS4]]),expression(hat(a)[n[BS5]]),
+            expression(hat(phi)[n[BS4]]), expression(hat(phi)[n[BS5]]))
+#str_detect(row.names(.x),"Ind2")
+walk(1:length(params),function(i,p){
+pp <- map(plotdata,function(.x){.x[i,]}) %>% do.call(rbind.data.frame,.)
+names(pp) <- c("Treatment","Estimate","SError")
+
+jpeg(filename=paste0("C:/Users/lucp9544/Desktop/PhD/Other Presentations","/para",i,".jpg"),
+    bg="transparent",height = 300)
+print(pp[pp$Treatment!=0,] %>% ggplot(aes(x = Treatment, y = Estimate, group = 1)) + geom_line() +
+                     geom_point(shape = 21,size=4,fill = "red2") + geom_errorbar(aes(ymin=Estimate-SError,
+                                                      ymax=Estimate+SError),width=0.2,
+                     position=position_dodge(0.05)) + labs(title=p[i],
+                                                           y="Estimate") + 
+                     theme_bw() + theme(plot.title = element_text(hjust = 0.5)) + 
+                     geom_hline(data=pp[pp$Treatment==0,],yintercept=pp[pp$Treatment==0,]$Estimate,
+                                col="steelblue",aes(colour="Control")) #+ 
+                     #geom_text(aes(x=400,y=pp[pp$Treatment==0,]$Estimate+0.08,label="Control")) + 
+                     #scale_colour_manual(values="steelblue",name="Control",
+                     #                    guide=guide_legend(fill=NULL,colour=NULL))
+      )
+dev.off()
+},params)
+
+#sigma_plot
+plotdata2 <- map2(Abundance_data$Treatment,Abundance_data$SErrors,function(.x,.y){return(cbind(.x,.y))}) %>% do.call(rbind.data.frame,.) %>% mutate(Var=rep(c("BS4","BS5"),times=6)) 
+
+plotdata2[plotdata2$.x!=0,] %>% ggplot(aes(x=.x,y=.y,group=Var,color=Var)) + geom_point() + 
+  geom_line() + labs(title="Error Variance",x="Treatment",y=expression(sigma)) + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + geom_hline(data=plotdata2[plotdata2$.x==0,],aes(yintercept=.y,col=Var,group=Var)) + 
+  scale_color_manual(values=c('#999999','#E69F00'),name="Specie") 
+
+plotdata3 <-  map2(Abundance_data$Treatment,Abundance_data$Adj.Corr,function(.x,.y){return(cbind(.x,.y))}) %>% do.call(rbind.data.frame,.) 
+
+#correlation
+plotdata3[plotdata3$.x!=0,] %>% ggplot(aes(x=log(.x),y=.y,group=1)) + geom_point() + 
+  geom_line() + labs(title="Adjusted Correlation",x="Treatment",y=expression(rho[adj])) + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))  + geom_hline(data=plotdata3[plotdata3$.x==0,],yintercept=plotdata3[plotdata3$.x==0,]$.y,col='#E69F00')
+
+#Fitted plots
+walk(1:6, function (.x, .y, .z, .p) {
+  test <- rep(NA, 36)
+  test[1:36 %in% as.numeric(names(.z[[.x]]))] <- .z[[.x]]
+  .y[[.x]] <- .y[[.x]] %>% mutate(Species = ifelse(Ind == "Abundance_4", "4", "5"),
+                                  Pred = test)
+  
+  jpeg(filename=paste0("C:/Users/lucp9544/Desktop/PhD/Other Presentations","/ModelFit",.p[[.x]],".jpg"),
+    bg="transparent",height = 300)
+print(  ggplot(data = .y[[.x]], aes(x=Time, y=log(Resp), group = 1) ) + 
+    geom_point(shape=21, size=5, fill="red2") + 
+          geom_line(aes( y = Pred), colour="steelblue", size=1.5) + 
+          facet_grid(Replicate ~ Species) + theme_bw() + labs(y="Log(Cyano Abundance)", 
+                                                              title = paste0("Treatment = ", .p[[.x]]) ) +
+  theme(plot.title = element_text(hjust = 0.5)) )
+dev.off()
+} , .y = Abundance_data$data, .z = Abundance_data$Pred, .p = Abundance_data$Treatment)
+```
+
+
+
+####  Abundance, With Linear and Quadratic Treatment Effect
+
+```{r}
+Abundance_data2 <- Monoculture_data_long %>%
+                 mutate(Ind3=if_else(Ind2==2,1,0),
+                        Ind4=if_else(Ind2==4,1,0),Ind2=Ind2/2) %>% 
+  nlme::gls(Resp2~-1+as.factor(Ind2)+log(Abundance_4_1):Ind3+log(Abundance_5_1):Ind4+Treatment:Ind3+
+            Treatment:Ind4,
+          data=.,correlation=corSymm(form=~Ind2|SampID),
+          weights=varIdent(form=~Treatment:Ind3+Treatment:Ind4|Ind2),
+          na.action=na.omit,method="ML")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+####  BS4, Atrazine=all
+
+```{r}
+#Using the Tidy verse Language
+BS4trt_modeldata <- Monoculture_data_long %>% dplyr::filter(Ind %in% c("TOPS_4","Abundance_4")) %>%
+                 group_by(Treatment) %>% nest()
+
+BS5trt_modeldata <- Monoculture_data_long %>% dplyr::filter(Ind %in% c("TOPS_5","Abundance_5")) %>%
+                 mutate(Ind2=if_else(Ind2==3,1,2)) %>% group_by(Treatment) %>% nest()
+
+####Functions for the model
+#BS4
+BS4trt_model <- function(x){
+  nlme::gls(Resp2~-1+log(TOPS_4_1+1)*as.factor(Ind2)+log(Abundance_4_1)*as.factor(Ind2),
+          data=x,correlation=corSymm(form=~Ind2|SampID),
+          weights=varIdent(form=~1|Ind2),
+          na.action = na.omit,method="ML")
+}
+#BS5
+BS5trt_model <- function(x){
+  nlme::gls(Resp2~-1+log(TOPS_5_1+1)*as.factor(Ind2)+log(Abundance_5_1)*as.factor(Ind2),
+          data=x,correlation=corSymm(form=~Ind2|SampID),
+          weights=varIdent(form=~1|Ind2),
+          na.action = na.omit,method="ML")
+}
+
+#BS4 Models
+BS4trt_modeldata <- BS4trt_modeldata %>% mutate(Models=map(BS4trt_modeldata$data,BS4trt_model))
+#adding the residuals
+BS4trt_modeldata <- BS4trt_modeldata %>% mutate(Resids = map(BS4trt_modeldata$Models,residuals))
+#adding the -2loglikelihood, predictions, the sigmas and correlations
+BS4trt_modeldata <- BS4trt_modeldata %>% mutate(ll2 = map(BS4trt_modeldata$Models,function(x){
+                                                          -2*logLik(x)
+                                                        })) %>%
+  mutate(AIC=map(BS4trt_modeldata$Models,function(x){AIC(x)})) %>% 
+  mutate(Pred = map(BS4trt_modeldata$Models,function(x){predict(x)})) %>% 
+  mutate(SErrors = map(BS4trt_modeldata$Models,function(x){unique(attr(residuals(x),"std"))})) %>%
+  mutate(Adj.Corr = map(BS4trt_modeldata$Models,function(x){ 
+    y <- corMatrix(x$modelStruct$corStruct)[[1]]
+    y[upper.tri(y)] })) %>% 
+  mutate(Stable = map(BS4trt_modeldata$Models,function(x){
+    summary(x)$tTable[,c(1,2,4)]
+  })) 
+
+##BS5
+BS5trt_modeldata <- BS5trt_modeldata %>% mutate(Models=map(BS5trt_modeldata$data,BS5trt_model))
+#adding the residuals
+BS5trt_modeldata <- BS5trt_modeldata %>% mutate(Resids = map(BS5trt_modeldata$Models,residuals))
+#adding the -2loglikelihood, predictions, the sigmas and correlations
+BS5trt_modeldata <- BS5trt_modeldata %>% mutate(ll2 = map(BS5trt_modeldata$Models,function(x){
+                                                          -2*logLik(x)
+                                                        })) %>%
+  mutate(AIC=map(BS5trt_modeldata$Models,function(x){AIC(x)})) %>% 
+  mutate(Pred = map(BS5trt_modeldata$Models,function(x){predict(x)})) %>% 
+  mutate(SErrors = map(BS5trt_modeldata$Models,function(x){unique(attr(residuals(x),"std"))})) %>%
+  mutate(Adj.Corr = map(BS5trt_modeldata$Models,function(x){ 
+    y <- corMatrix(x$modelStruct$corStruct)[[1]]
+    y[upper.tri(y)] })) %>% 
+  mutate(Stable = map(BS5trt_modeldata$Models,function(x){
+    summary(x)$tTable[,c(1,2,4)]
+  }))
+
+#### Plotting data
+plotdata4 <- map2(BS4trt_modeldata$Treatment,BS4trt_modeldata$Stable,function(.x,.y){
+  d <- .y[,1:2]
+  return(cbind(.x,d))
+})
+
+plotdata5 <- map2(BS5trt_modeldata$Treatment,BS5trt_modeldata$Stable,function(.x,.y){
+  d <- .y[,1:2]
+  return(cbind(.x,d))
+})
+
+#########making the plots
+params <- c(expression(hat(phi)[y]),expression(hat(a)[y]),expression(hat(a)[n]),
+            expression(hat(beta)[ny]),expression(hat(beta)[yn]),expression(hat(phi)[n]))
+walk(1:length(params),function(i,p){
+p4 <- map(plotdata4,function(.x){.x[i,]}) %>% do.call(rbind.data.frame,.)
+p5 <- map(plotdata5,function(.x){.x[i,]}) %>% do.call(rbind.data.frame,.)
+names(p4) <- names(p5) <- c("Treatment","Estimate","SError")
+
+jpeg(filename=paste0("C:/Users/lucp9544/Desktop/PhD/Other Presentations","/logpara",i,".jpg"),
+    bg="transparent",height = 300)
+print(bind_rows(p4,p5) %>% mutate(Specie=rep(c("BS4","BS5"),each=6)) %>%
+                     ggplot(aes(x=log(Treatment+1),y=Estimate,group=Specie,color=Specie)) + geom_line() +
+                     geom_point() + geom_errorbar(aes(ymin=Estimate-SError,
+                                                      ymax=Estimate+SError),width=0.2,
+                     position=position_dodge(0.05)) + labs(title=p[i],
+                                                           y="Estimate") + 
+                     theme_classic() + scale_color_manual(values=c('#999999','#E69F00')) +
+                     theme(plot.title = element_text(hjust = 0.5)) )
+dev.off()
+},params)
+
+####plots for the sigmas
+sig4 <- map2(BS4trt_modeldata$Treatment,BS4trt_modeldata$SErrors,function(.x,.y){return(cbind(.x,.y))}) %>% do.call(rbind.data.frame,.) %>% mutate(Var=rep(c("Sigy","Sign"),times=6))
+
+sig5 <- map2(BS5trt_modeldata$Treatment,BS5trt_modeldata$SErrors,function(.x,.y){return(cbind(.x,.y))}) %>% do.call(rbind.data.frame,.) %>% mutate(Var=rep(c("Sigy","Sign"),times=6))
+names(sig4) <- names(sig5) <- c("Treatment","Sigma","Var")
+
+params_sigma <- unique(sig4$Var); p2 <- c(expression(hat(sigma)[y]),expression(hat(sigma)[n]))
+walk(1:length(params_sigma),function(i,p,p2){
+  jpeg(filename=paste0("C:/Users/lucp9544/Desktop/PhD/Other Presentations","/logsigma",i,".jpg"),
+    bg="transparent",height = 300)
+  
+  print(bind_rows(sig4,sig5) %>% mutate(Specie=rep(c("BS4","BS5"),each=12)) %>% dplyr::filter(Var==p[i]) %>% 
+     ggplot(aes(x=log(Treatment+1),y=Sigma,group=Specie,color=Specie)) + geom_point() + geom_line() +   
+     labs(title=p2[i],y="Estimate") +  theme_classic() + 
+     scale_color_manual(values=c('#999999','#E69F00')) +
+     theme(plot.title = element_text(hjust = 0.5)) )
+  dev.off()
+     },params_sigma,p2)
+
+####plots for the Adjusted Association
+adcor4 <- map2(BS4trt_modeldata$Treatment, BS4trt_modeldata$Adj.Corr,
+               function(.x,.y){return(cbind(.x,.y))}) %>% do.call(rbind.data.frame,.)
+adcor5 <- map2(BS5trt_modeldata$Treatment, BS5trt_modeldata$Adj.Corr,
+               function(.x,.y){return(cbind(.x,.y))}) %>% do.call(rbind.data.frame,.)
+names(adcor4) <- names(adcor5) <- c("Treatment","rho")
+
+jpeg(filename=paste0("C:/Users/lucp9544/Desktop/PhD/Other Presentations","/logrho.jpg"),
+    bg="transparent",height = 300)
+print(bind_rows(adcor4,adcor5) %>% mutate(Specie=rep(c("BS4","BS5"),each=6)) %>% 
+  ggplot(aes(x=log(Treatment),y=rho,group=Specie,color=Specie)) + geom_point() + geom_line() + 
+  labs(title=expression(hat(rho)),y="Estimate") + theme_classic() + 
+     scale_color_manual(values=c('#999999','#E69F00')) +
+     theme(plot.title = element_text(hjust = 0.5))  )
+
+dev.off()
+#### Residual Plots checking for time trend
+#BS4
+map2(BS4trt_modeldata$Treatment, BS4trt_modeldata$Resids,
+               function(.x,.y){return(cbind(.x,.y))}) %>% walk(function(x){
+              jpeg(filename=paste0("C:/Users/lucp9544/Desktop/PhD/Other Presentations",
+                                   "/acfBS4_",unique(x[,".x"]),".jpg"),
+                   bg="transparent",height = 300)
+                 acf(x[,".y"],main=paste0("Treatment=",unique(x[,".x"])) )
+                 dev.off()
+                 })
+
+#BS5
+map2(BS5trt_modeldata$Treatment, BS5trt_modeldata$Resids,
+               function(.x,.y){return(cbind(.x,.y))}) %>% walk(function(x){
+              jpeg(filename=paste0("C:/Users/lucp9544/Desktop/PhD/Other Presentations",
+                                   "/acfBS5_",unique(x[,".x"]),".jpg"),
+                   bg="transparent",height = 300)
+                 acf(x[,".y"],main=paste0("Treatment=",unique(x[,".x"])) )
+                 dev.off()
+                 })
+```
+
+
+###  Invasion Time Period
+
+####  BS4, Atrazine=all
+
+```{r}
+ESTSE_invasion <- vector("list",length(unique(Invasion_data_wide$Treatment)))
+#predDATA_invasion <- vector("list",length(unique(Invasion_data_wide$Treatment)))
+ll2_invasion <- numeric(length(unique(Invasion_data_wide$Treatment)))
+
+for(i in 1:length(unique(Invasion_data_wide$Treatment))){
+  ND_invasion <- Invasion_data_wide[37:360,] %>%   
+                 filter(Treatment==unique(Invasion_data_wide$Treatment)[i])
+  #the model
+  AR41a <- function(ND_invasion){
+      function(parm){
+        #intercepts
+        a_TOP_t_1 <- parm[1]
+        a_AB_t_1 <- parm[2]
+        #effects on each other
+        phi_TOP_t_1 <- parm[3] #effect of previous TOP on itself
+        phi_AB_t_1 <- parm[4] #effect of previous Abundance on itself
+        #cross effects
+        beta_AB4_TOP4 <- parm[5] #effect of previous Abundance on current TOP, BS4
+        beta_TOP4_AB4 <- parm[6] #effect of previous TOP on current Abundance, BS4,
+        beta_AB5_TOP4 <- parm[7] #effect of previous BS5 Abundance on current BS4 TOP
+        beta_TOP5_AB4 <- parm[8] #effect of previous BS5 TOP on current BS4 Abundance
+        beta_AB5_AB4 <- parm[9] #effect of previous BS5 Abundance on current BS4 Abunance
+        beta_TOP5_TOP4 <- parm[10] #effect of previous BS5 TOP on current BS4 TOP
+        #varaince-covariance parameters
+        sig1 <- parm[11]
+        sig2 <- parm[12]
+        sig12 <- parm[13]
+      
+        #TOP
+        mu_TOP4 <- a_TOP_t_1 + phi_TOP_t_1*log(ND_invasion$TOPS_4_1+1) +
+                   beta_AB4_TOP4*log(ND_invasion$Abundance_4_1) + 
+                   beta_TOP5_TOP4*log(ND_invasion$TOPS_5_1+1) + 
+                   beta_AB5_TOP4*log(ND_invasion$Abundance_5_1)
+       #Abundance
+       mu_AB4 <- a_AB_t_1 + beta_TOP4_AB4*log(ND_invasion$TOPS_4_1+1) +
+                 phi_AB_t_1*log(ND_invasion$Abundance_4_1) + beta_TOP5_AB4*log(ND_invasion$TOPS_5_1+1) +
+                 beta_AB5_AB4*log(ND_invasion$Abundance_5_1)
+       #variance covariance matrix
+       Sigma <- matrix(c(sig1*sig1,sig12,sig12,sig2*sig2),ncol=2,byrow=T)
+      
+      ll <- 0
+      for(i in NROW(ND_invasion)){
+        #mh <- mahalanobis(x=c(log(ND_invasion$TOP_BS4[i]+1),
+        #                              log(ND_invasion$BS4Abundance[i])),
+        #                  center=c(mu_TOP4[i],mu_AB4[i]),cov=Sigma)
+        #ll <- ll + log(2*pi) + 0.5*log(det(Sigma)) + 0.5*mh 
+       #print(ll)
+        #a = ((log(ND_invasion$TOP_BS4[i]+1) - mu_TOP4[i])^2)/(sig1*sig1)
+        #b = (2*rho*(log(ND_invasion$TOP_BS4[i]+1) - mu_TOP4[i])*
+        #       (log(ND_invasion$BS4Abundance[i]) - mu_AB4[i]))/(sig1*sig2)
+        #c = ((log(ND_invasion$BS4Abundance[i]) - mu_AB4[i])^2)/(sig2*sig2)
+        #z = a - b + c;
+      #ll = ll + log(2*pi) + 0.5*log((1-rho^2)*(sig1*sig1)*(sig2*sig2)) + z/(2*(1-rho^2))
+        #M2
+      ll <- ll - mvtnorm::dmvnorm(x=c(log(ND_invasion$TOP_BS4[i]+1),
+                                      log(ND_invasion$BS4Abundance[i])),
+                                  mean=c(mu_TOP4[i],mu_AB4[i]),sigma=Sigma,log=T)
+        print(ll)
+      }
+      return(ll)
+   }
+  }
+  #AR41_gr <- function(parms){
+  #  numDeriv::grad(function(){
+      
+  #  },x=parms)
+  #}
+  arloglike <- AR41a(ND_invasion)
+  r401a <- optim(fn=arloglike,par=c(a_TOP_t_1=3,phi_TOP_t_1=0,
+                                    beta_AB4_TOP4=0,beta_TOP5_TOP4=0,
+                                    beta_AB5_TOP4=0.0001,
+                                    a_AB_t_1=6,beta_TOP4_AB4=0.0001,
+                                    phi_AB_t_1=0,beta_TOP5_AB4=0,
+                                    beta_AB5_AB4=0,
+                                    sig1=0.4,sig2=0.4,sig12=0),hessian=T,
+            method="SANN",control=list(maxit=2000)
+            )
+  r401a <- optimz::opm(fn=arloglike,par=c(a_TOP_t_1=3,phi_TOP_t_1=0,
+                                    beta_AB4_TOP4=0,beta_TOP5_TOP4=0,
+                                    beta_AB5_TOP4=0.0001,
+                                    a_AB_t_1=6,beta_TOP4_AB4=0.0001,
+                                    phi_AB_t_1=0,beta_TOP5_AB4=0,
+                                    beta_AB5_AB4=0,
+                                    sig1=0.3,sig2=0.4,sig12=0),hessian=T,
+                                    #lower=c(rep(-Inf,10),1.0e-7,1.0e-7,-Inf),
+                                    #upper=c(rep(Inf,10),Inf,Inf,399),
+                                    method="ALL",control=list(usenumDeriv=T,maxit=2000)
+            )
+            
+  
+  #Parameter Estimates and SERROR
+  ESTSE_invasion[[i]] <- data.frame(Estimate=r401a$par,SError=sqrt(diag(solve(r401a$hessian))))
+  
+  #likelihood values
+  ll2_invasion[[i]] <- 2*r401a$value
+       
+  #Predictions
+}
+
+names(ESTSE_invasion) <- names(predDATA) <- names(ll2) <- unique(Monoculture_data_wide$Treatment)
+
+#Parameter Estimates, loglikelihood and standard errors
+#mod401_estimates <- r401a$par; l1mod41 <- 2*r41a$value; mod41_serror <- sqrt(diag(solve(r41a$hessian)))
+
+```
+
+
+#### Extension with Treatment as Covariate (Monoculture)
+
+```{r}
+##BS4
+ND2 <- Monoculture_data_long %>% filter(Ind %in% c("TOPS_4","Abundance_4"))
+ND2 <- ND2[order(ND2$Ind2, ND2$SampID),]
+
+###Adding treatment as a numeric covariate
+mod4_all <- nlme::gls(Resp2~-1+log(TOPS_4_1+1)*as.factor(Ind2)+log(Abundance_4_1)*as.factor(Ind2)+
+                        I(Treatment/100)*as.factor(Ind2),
+          data=ND2,correlation=corSymm(form=~Ind2|SampID),
+          weights=varIdent(form=~1|Ind2),
+          na.action = na.omit,method="ML")
+
+ND2$ind3 <- ifelse(ND2$Ind2==2,0,1)
+mod4b_all <- nlme::gls(Resp2~-1+log(TOPS_4_1+1):ind3+log(Abundance_4_1)*as.factor(Ind2)+
+                        as.factor(Treatment)*as.factor(Ind2),
+          data=ND2,correlation=corSymm(form=~Ind2|SampID),
+          weights=varIdent(form=~1|Ind2),
+          na.action = na.omit,method="ML")
+
+###Adding time as a numeric covariate alongside Treatment
+mod4t_all <- nlme::gls(Resp2~-1+log(TOPS_4_1+1)*as.factor(Ind2)+log(Abundance_4_1)*as.factor(Ind2)+
+                        I(Treatment/100)*as.factor(Ind2)+Time*as.factor(Ind2),
+          data=ND2,correlation=corSymm(form=~Ind2|SampID),
+          weights=varIdent(form=~1|Ind2),
+          na.action = na.omit,method="ML")
+
+
+##BS5
+ND2 <- Monoculture_data_long %>% filter(Ind %in% c("TOPS_5","Abundance_5"))
+ND2 <- ND2[order(ND2$Ind2, ND2$SampID),]
+ND2$Ind2 <- rep(1:2,each=108)
+
+mod5_all <- nlme::gls(Resp2~-1+log(TOPS_5_1+1)*as.factor(Ind2)+log(Abundance_5_1)*as.factor(Ind2)+
+                        as.factor(Treatment)*as.factor(Ind2),
+          data=ND2,correlation=corSymm(form=~Ind2|SampID),
+          weights=varIdent(form=~1|Ind2),
+          na.action = na.omit,method="ML")
+
+###Adding time as a numeric covariate alongside Treatment
+mod5t_all <- nlme::gls(Resp2~-1+log(TOPS_5_1+1)*as.factor(Ind2)+log(Abundance_5_1)*as.factor(Ind2)+
+                        I(Treatment/100)*as.factor(Ind2)+Time*as.factor(Ind2),
+          data=ND2,correlation=corSymm(form=~Ind2|SampID),
+          weights=varIdent(form=~1|Ind2),
+          na.action = na.omit,method="ML")
+
+ND2$ind3 <- ifelse(ND2$Ind2==2,0,1)
+mod5b_all <- nlme::gls(Resp2~-1+log(TOPS_5_1+1):ind3+log(Abundance_5_1)*as.factor(Ind2)+
+                        I(Treatment/100)*as.factor(Ind2),
+          data=ND2,correlation=corSymm(form=~Ind2|SampID),
+          weights=varIdent(form=~1|Ind2),
+          na.action = na.omit,method="ML")
+```
+
+
+####  Some Depper Diagnostics
+
+```{r}
+acf(mod5t_all$residuals[ND2$Ind2==1],na.action = na.omit,main="BS5 TOP Residuals (After Accounting for Time)")
+
+```
+
+
+
+```{r}
+#lotka-voltera(Jurg's form)
+purrr::map(c("400", "50"), function(.x, .y) {
+  abd_data <- data_monoculture %>% dplyr::mutate(BS4_1 = lag(.$`BS4; 1`, 1)) %>%
+    dplyr::filter(Treatment == .x) %>% dplyr::select(Time, `BS4; 1`, BS4_1)
+  names(abd_data) <- c("time", "abd", "abd_1")
+  #taking log
+  abd_data$abd <- log(abd_data$abd); abd_data$abd_1 <- log(abd_data$abd_1)
+  
+  
+  ##Fitting using non-linear least-squa#data at time = 2
+    adb400_2 <- c(abd = abd_data$abd[1])
+    #time vector
+    times <- sort(unique(c(seq(2, 60, length = 100), abd_data$time)))
+  ss2a <- function(parms){
+    #parameters
+    A <- parms[2]
+    mu <- parms[1]
+    # 
+    out1 <- deSolve::ode(y = adb400_2, times = times, func = ltk1, parms = list(A = A, mu = mu))
+    #filtering out the observed data
+    out1_df <- as.data.frame(out1); out1_df <- out1_df[out1_df$time %in% abd_400$time, ]
+    out1_df$abd - abd_400$abd
+  }
+  #initial parameter guess
+  PCGR <- sapply(1:NROW(abd_data), function(i, x, y){
+    if(i == NROW(abd_data)) return(NA)
+      pcgr <- ((x[i + 1] - x[i]) / x[i]) / (y[i + 1] - y[i])
+      #pcgr7 <- pcgr / 7
+    return(pcgr)
+  }, x = abd_data$abd, y = abd_data$time)
+  parms <- c(mu = max(PCGR, na.rm = T), A = max(PCGR, na.rm = T) / max(abd_400$abd))
+  bs4_model <- minpack.lm::nls.lm(par = parms, fn = ss2a)
+  ests_ode <- coef(bs4_model)
+  ss2a_mle <- function(parms){
+    #data at time = 2
+    adb400_2 <- c(abd = abd_400$abd[1])
+    #time vector
+    times <- sort(unique(c(seq(2, 60, length = 100),abd_400$time)))
+    #parameters
+    A <- parms[2]
+    mu <- parms[1]
+    sig_abd4 <- parms[3]
+    # 
+    out1 <- deSolve::ode(y = adb400_2, times = times, func = ltk1, parms = list(A = A, mu = mu))
+    #filtering out the observed data
+    out1_df <- as.data.frame(out1); out1_df <- out1_df[out1_df$time %in% abd_400$time, ]
+    -sum(dnorm(abd_400$abd, out1_df$abd, sd = sig_abd4, log = T))
+}
+  parms <- c(mu = max(PCGR, na.rm = T), A = max(PCGR, na.rm = T) / max(abd_400$abd), sig_abd4 = 0.2)
+  ests_ode2 <- stats::nlminb(objective = ss2a_mle, start = parms, 
+                         lower = rep(0.001, 3), hessian = T)
+  ll_ode <- ests_ode2$objective*2
+  aic_ode <- ll_ode + 2*length(ests_ode)
+  
+  #AR1
+  ar1_mod <- nlme::gls(abd ~ abd_1, data = abd_data[!is.na(abd_data$abd_1), ], method = "ML")
+  ests_ar1 <- coef(ar1_mod)
+  aic_ar1 <- AIC(ar1_mod)
+  
+  #plotting the observed data against the predicted
+  out_ode <- deSolve::ode(y = adb400_2, times = times, func = ltk1, 
+                          parms = list(A = coef(bs4_model)[2], mu = coef(bs4_model)[1]))
+  out_ode <- as.data.frame(out_ode)
+  out_ar1 <- data.frame(time = abd_data$time[!is.na(abd_data$abd_1)], ar_fitted = ar1_mod$fitted)
+  plot1 <- abd_data %>% ggplot(aes(x = time, y = abd)) + geom_point(size = 2, color = "black", shape = 20) + 
+    geom_line(data = out_ode, aes(x = time, y = abd), color = 3, lty = 2) + 
+    geom_line(data = out_ar1, aes(x = time, y = ar_fitted), color = 4, lty = 3) + theme_minimal()
+  print(plot1)
+  return(list(ode_AIC = aic_ode, ar1_AIC = aic_ar1))
+}, .y = data_monoculture)
+
+
+abd_400 <- data_monoculture %>% dplyr::filter(Treatment == 400) %>% dplyr::select(Time, `BS4; 1`)
+#changing the names
+names(abd_400) <- c("time", "abd")
+#taking log
+abd_400$abd <- log(abd_400$abd)
+#The differential equation (Lotka - Voltera, Jurg's form)
+ltk1 <- function (Time, abd, parms, ...){
+    mu <- parms$mu
+    A <- parms$A
+    #mu =  inherent growth per-capita
+    #A = ratio of mu and carrying capacity
+    dABD <- (mu - A*abd) * abd
+    list(dABD)
+}
+
+#data at time = 2
+adb400_2 <- c(abd = abd_400$abd[1])
+#time vector
+times <- sort(unique(c(seq(2, 60, length = 100),abd_400$time)))
+#initial parameter guess
+PCGR <- sapply(1:7, function(i, x, y){
+  if(i == 7) return(NA)
+  pcgr <- ((x[i+1] - x[i]) / x[i]) / (y[i+1] - y[i])
+  #pcgr7 <- pcgr / 7
+  return(pcgr)
+  }, x = abd_400$abd, y = abd_400$time)
+parms <- list(mu = max(PCGR, na.rm = T), A = max(PCGR, na.rm = T) / max(abd_400$abd))
+# 
+out1 <- deSolve::ode(y = adb400_2, times = times, func = ltk1, parms = parms)
+plot(out1, ylim = c(min(abd_400$abd), max(abd_400$abd)) )
+points(abd_400$time, abd_400$abd)
+out1_df <- as.data.frame(out1)
+out1_df[out1_df$time %in% abd_400$time, ]
+
+##Fitting using non-linear least-squares
+ss2a <- function(parms){
+  #data at time = 2
+  adb400_2 <- c(abd = abd_400$abd[1])
+  #time vector
+  times <- sort(unique(c(seq(2, 60, length = 100), abd_400$time)))
+  #parameters
+  A <- parms[2]
+  mu <- parms[1]
+  # 
+  out1 <- deSolve::ode(y = adb400_2, times = times, func = ltk1, parms = list(A = A, mu = mu))
+  #filtering out the observed data
+  out1_df <- as.data.frame(out1); out1_df <- out1_df[out1_df$time %in% abd_400$time, ]
+  out1_df$abd - abd_400$abd
+}
+
+#initial parameter guess
+PCGR <- sapply(1:7, function(i, x, y){
+  if(i == 7) return(NA)
+    pcgr <- ((x[i+1] - x[i]) / x[i]) / (y[i+1] - y[i])
+    #pcgr7 <- pcgr / 7
+    return(pcgr)
+  }, x = abd_400$abd, y = abd_400$time)
+parms <- c(mu = max(PCGR, na.rm = T), A = max(PCGR, na.rm = T) / max(abd_400$abd))
+bs4_400 <- minpack.lm::nls.lm(par = parms, fn = ss2a)
+
+#to plot
+out2 <- deSolve::ode(y = adb400_2, times = times, func = ltk1, parms = list(A = coef(bs4_400)[2], 
+                                                                   mu = coef(bs4_400)[1]))
+
+#using mle (optimization problem)
+ss2a_mle <- function(parms){
+  #data at time = 2
+  adb400_2 <- c(abd = abd_400$abd[1])
+  #time vector
+  times <- sort(unique(c(seq(2, 60, length = 100),abd_400$time)))
+  #parameters
+  A <- parms[2]
+  mu <- parms[1]
+  sig_abd4 <- parms[3]
+  # 
+  out1 <- deSolve::ode(y = adb400_2, times = times, func = ltk1, parms = list(A = A, mu = mu))
+  #filtering out the observed data
+  out1_df <- as.data.frame(out1); out1_df <- out1_df[out1_df$time %in% abd_400$time, ]
+  -sum(dnorm(abd_400$abd, out1_df$abd, sd = sig_abd4, log = T))
+}
+
+parms <- c(mu = max(PCGR, na.rm = T), A = max(PCGR, na.rm = T) / max(abd_400$abd), sig_abd4 = 0.2)
+bs4_4002 <- stats::nlminb(objective = ss2a_mle, start = parms, 
+                         lower = rep(0.001, 3), hessian = T)
+```
