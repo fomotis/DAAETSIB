@@ -30,13 +30,15 @@ source("Codes/Functions/noneg.R")
 source("Codes/Functions/retain.R")
 source("Codes/Functions/plotting_functions.R")
 source("Codes/Functions/cell_debris.R")
-source("Codes/Functions/cell_debris_nc.R")
-source("Codes/Functions/redfscgoodbad.R")
+#source("Codes/Functions/cell_debris_nc.R")
+source("Codes/Functions/Height_Height.R")
 source("Codes/Functions/debris_nc.R")
 source("Codes/Functions/debris_c.R")
-source("Codes/Functions/bs4_nc.R")
+#source("Codes/Functions/bs4_nc.R")
 source("Codes/Functions/bs4_c.R")
+source("Codes/Functions/bs4_invasion_c.R")
 source("Codes/Functions/bs5_c.R")
+source("Codes/Functions/bs5_invasion_c.R")
 source("Codes/Functions/Margin_Cells.R")
 ```
 
@@ -209,7 +211,7 @@ names(meta_files) <- paste0(c("Prelim","Day1","Day2","Day3Dil100",
                          "Day5Dil2000","Day6Dil100","Day6Dil2000",
                          "Day7Dil100","Day7Dil2000"),"MetaFile")
 
-rm(files_metadata,temp)
+#rm(files_metadata,temp)
 
 
 ################################ Invasion ##########################################
@@ -276,7 +278,7 @@ for (k in 1:length(files_metadata_invasion)){
 names(meta_files_invasion) <- paste0(c("Day1Dil100", "Day1Dil2000", "Day1Dilmix", "Day2", "Day3",
                          "Day4", "Day5", "Day6", "Day7",
                          "Day8", "Day9", "Day10"), "MetaFile")
-rm(files_metadata_invasion)
+#rm(files_metadata_invasion)
 ```
 
 ### Can Measurements be Trusted?
@@ -455,13 +457,12 @@ lapply(2:8, function(i) {
   })
 })
 
-
 #log Transformation
 log_transformedSet <- lapply(NonNegatives, function(x, ntt) {
    fsApply(x, function (y, ntt2) {
      lnTrans(y, notToTransform = ntt2)
    },ntt2 = ntt)
-},ntt = c("SSC.W", "TIME"))
+}, ntt = c("SSC.W", "TIME"))
 
 lapply(4:8, function(i) {
   sapply(1:36, function (j) {
@@ -474,7 +475,7 @@ rm(NonNas, NonNegatives)
 ##########################  Invasion  ########################
 
 #original particle count
-ParticleCount_invasion <- lapply(full_dataset_good_invasion[c(1, 3:11)], function(x){
+ParticleCount_invasion <- lapply(full_dataset_good_invasion, function(x){
   fsApply(x, nrow)
 })
 
@@ -492,11 +493,11 @@ NonNas_invasion <- lapply(NonNegatives_invasion, function(x) {
 })
 
 #log Transformation
-log_transformedSet_invasion <- lapply(NonNas_invasion, function(x, ntt){
+log_transformedSet_invasion <- lapply(NonNas_invasion, function(x, ntt) {
    fsApply(x, function(y, ntt2){
      lnTrans(y, notToTransform = ntt2)
    },ntt2 = ntt)
-},ntt = c("SSC.W","TIME"))
+},ntt = c("SSC.W", "TIME"))
 
 rm(NonNas_invasion, NonNegatives_invasion)
 ```
@@ -633,6 +634,67 @@ logtrans_margin_dataset$Day6[31, ] <- special[[5]]
 logtrans_margin_dataset$Day6[35, ] <- special[[6]]
 rm(special)
 
+######### Margin events for Invasion #############
+
+cellmargin_invasion_special <- function(flow.frame, Channel = "SSC.W") {
+    infl_point1 <- flowDensity::deGate(flow.frame, Channel, bimodal = T)
+    infl_point2 <- flowDensity::deGate(flow.frame, Channel, after.peak = T)
+    #plotting
+    flowDensity::plotDens(flow.frame, c(Channel, "FSC.HLin"), main = identifier(flow.frame))
+    abline(v = infl_point1, lwd = 1, lty = 4, col = 2)
+    abline(v = infl_point2, lwd = 1, lty = 4, col = 2)
+    
+    margin.ind <- ifelse(exprs(flow.frame)[, Channel] > infl_point1 & 
+                           exprs(flow.frame)[, Channel] < infl_point2, 
+                          T , F) #FALSE=Margin Event
+    n_margin <- sum(margin.ind == F) #part of output
+    
+    #constructing full flow frame with both margin and non-margin events
+    exx <- as.matrix(cbind(exprs(flow.frame), as.numeric(margin.ind))) #1=not margin, 0=margin
+    colnames(exx)[ncol(exx)] <- 'Margin.Indicator' #1 = not amrgin, 0 = margin
+    
+    #constructing the annotated data frame for the parameter
+    ddata <- data.frame(rbind(flow.frame@parameters@data,
+                              c("Margin.Indicator", "Margin Indicator", 1, 0, 1)))
+    row.names(ddata) <- c(row.names(flow.frame@parameters@data), paste0("$", "P", ncol(exx)))
+    dvarMetadata <- flow.frame@parameters@varMetadata
+    ddimnames <- flow.frame@parameters@dimLabels
+    paraa <- Biobase::AnnotatedDataFrame(data = ddata, varMetadata = dvarMetadata, 
+                                         dimLabels = ddimnames)
+    describe <- flow.frame@description
+    fflowframe <- new("flowFrame", exprs = exx, parameters = paraa, description = describe)
+    
+    #constructing flowframe with only the non margin events
+    exx2 <- exx[exx[,'Margin.Indicator'] == 1, ]
+    rflowframe <- new("flowFrame", exprs = exx2, parameters = paraa, description = describe)
+    return(list(reducedflowframe = rflowframe, fullflowframe = fflowframe, N_margin = n_margin,
+              N_cell = nrow(rflowframe), N_particle = nrow(fflowframe)))
+}
+#filtering out margin evets
+logtrans_margin_invasion <- lapply(log_transformedSet_invasion, function(x) {
+  dlist <- fsApply(x, function(y, ch, typ) {
+    cellmargin(y, Channel = ch, type = "estimate")$reducedflowframe
+  }, ch = "SSC.W")
+})
+
+special_invasion <- cellmargin_invasion_special(log_transformedSet_invasion$Day9[[1]])
+logtrans_margin_invasion$Day9[[1]] <- special_invasion$reducedflowframe
+
+logtrans_margin_invasion_dataset <- lapply(log_transformedSet_invasion, function(x) {
+  fsApply(x, function(y, ch, typ){
+    ttt1 <- cellmargin(y, Channel = ch, type = "estimate")
+    nmargin <- ttt1$N_margin
+    ncell <- ttt1$N_cell
+    nparticle <- ttt1$N_particle
+    return(data.frame(ncell = ncell, nmargin = nmargin, nparticle = nparticle,
+                      File = identifier(ttt1$reducedflowframe) ))
+  },ch = "SSC.W") %>% do.call(rbind.data.frame, .)
+})
+
+logtrans_margin_invasion_dataset$Day9[1, ] <- c(special_invasion$N_cell, special_invasion$N_margin,
+                                                special_invasion$N_particle, 
+                                                identifier(special_invasion$reducedflowframe))
+
 ```
 
 ### Removing and Flagging Debris
@@ -660,7 +722,7 @@ logtrans_debris_percent <- lapply(logtrans_margin, function(x){
     debris_percentage <- fsApply(x, function (y) {
     counter <<- counter + 1
       if (counter <= 6) {
-          ttt <- celldebris(y, positions = c(F, NA), control_use = c(T, T), 
+          ttt <- celldebris(y,  control_use = c(T, T), 
                             interest = "BS4",
                control_flowFrame = c(BS4_control[[1]][[1]], BS4_control[[1]][[1]]),
                mono_control = BS4_control[[1]][[1]])
@@ -668,7 +730,7 @@ logtrans_debris_percent <- lapply(logtrans_margin, function(x){
           N_particle <- ttt$N_particle
           N_others <- ttt$N_others
       } else {
-        ttt <- celldebris(y, positions = c(F, NA), control_use = c(T, T), 
+        ttt <- celldebris(y, control_use = c(T, T), 
                             interest = "BS5",
                control_flowFrame = c(BS5_control[[1]][[1]], BS5_control[[1]][[1]]),
                mono_control = BS5_control[[1]][[1]])
@@ -684,7 +746,7 @@ logtrans_debris_percent <- lapply(logtrans_margin, function(x){
       debris_percentage <- fsApply(x, function(y){
     counter <<- counter + 1
     if(counter <= 18 & substring(identifier(y), first = nchar(identifier(y))) == "1"){
-        ttt <- celldebris(y, positions = c(F,NA), control_use = c(T, T),interest = "BS4",
+        ttt <- celldebris(y, control_use = c(T, T),interest = "BS4",
                control_flowFrame = c(BS4_control[[2]][[1]], BS4_control[[2]][[1]]),
                mono_control = BS4_control[[2]][[1]])
           Cell_count <- ttt$Cell_count
@@ -692,7 +754,7 @@ logtrans_debris_percent <- lapply(logtrans_margin, function(x){
           N_others <- ttt$N_others
       } else if(counter <= 18 & substring(identifier(y), first = nchar(identifier(y))) == "2"){
         #counter <<- counter + 1
-        ttt <- celldebris(y, positions = c(F, NA),control_use = c(T, T), interest = "BS4",
+        ttt <- celldebris(y, control_use = c(T, T), interest = "BS4",
                control_flowFrame = c(BS4_control[[2]][[2]], BS4_control[[2]][[2]]),
                mono_control = BS4_control[[2]][[1]])
           Cell_count <- ttt$Cell_count
@@ -700,7 +762,7 @@ logtrans_debris_percent <- lapply(logtrans_margin, function(x){
           N_others <- ttt$N_others
       } else if(counter <= 18 & substring(identifier(y), first = nchar(identifier(y))) == "3"){
         #counter <<- counter + 1
-        ttt <- celldebris(y,positions = c(F, NA), control_use = c(T,T),interest = "BS4",
+        ttt <- celldebris(y, control_use = c(T,T),interest = "BS4",
                control_flowFrame = c(BS4_control[[2]][[3]], BS4_control[[2]][[3]]),
                mono_control = BS4_control[[2]][[1]])
           Cell_count <- ttt$Cell_count
@@ -709,7 +771,7 @@ logtrans_debris_percent <- lapply(logtrans_margin, function(x){
       } else if((counter > 18 & counter <= 36) & substring(identifier(y),
             first = nchar(identifier(y))) == "1"){
         #counter <<- counter + 1
-          ttt <- celldebris(y,positions = c(F, NA), control_use = c(T, T),interest = "BS5",
+          ttt <- celldebris(y, control_use = c(T, T),interest = "BS5",
                control_flowFrame = c(BS5_control[[2]][[1]], BS5_control[[2]][[1]]),
                mono_control = BS5_control[[2]][[3]])
           Cell_count <- ttt$Cell_count
@@ -718,16 +780,16 @@ logtrans_debris_percent <- lapply(logtrans_margin, function(x){
       }else if((counter > 18 & counter <= 36) & substring(identifier(y),
               first=nchar(identifier(y))) == "2"){
         #counter <<- counter + 1
-        ttt <- celldebris(y, positions = c(F, NA), control_use = c(T, T), interest = "BS5",
+        ttt <- celldebris(y, control_use = c(T, T), interest = "BS5",
                control_flowFrame = c(BS5_control[[2]][[2]], BS5_control[[2]][[2]]),
                mono_control = BS5_control[[2]][[3]])
           Cell_count <- ttt$Cell_count
           N_particle <- ttt$N_particle
           N_others <- ttt$N_others
-        }else if((counter > 18 & counter <= 36) & substring(identifier(y),
+        } else if((counter > 18 & counter <= 36) & substring(identifier(y),
               first=nchar(identifier(y))) == "3"){
         #counter <<- counter + 1
-          ttt <- celldebris(y,positions = c(F, NA), control_use = c(T, T),interest = "BS5",
+          ttt <- celldebris(y, control_use = c(T, T),interest = "BS5",
                control_flowFrame = c(BS5_control[[2]][[3]], BS5_control[[2]][[3]]),
                mono_control = BS5_control[[2]][[3]])
           Cell_count <- ttt$Cell_count
@@ -744,8 +806,6 @@ logtrans_debris_percent <- lapply(logtrans_margin, function(x){
   return(debris)
 })
 
-#goods_good <- good_measurements[names(good_measurements) %in% names(full_dataset_good)]
-
 #if 2000 was used for the time > 3
 #debris_count_data <- lapply(1:length(logtrans_debris_percent), function(i, x){
 #    names(logtrans_debris_percent)[4:8] <- paste0(names(logtrans_debris_percent)[4:8], "Dil2000")
@@ -760,7 +820,7 @@ logtrans_debris_percent <- lapply(logtrans_margin, function(x){
 debris_count_data <- lapply(1:length(logtrans_debris_percent), function(i, x){
   if(i <= 3){
     y <- do.call(rbind.data.frame,x[[i]]) %>% mutate(CPML = good_measurements[[i]]$CML)
-  } else y <- do.call(rbind.data.frame,x[[i]]) %>% mutate(CPML = Retained[[i-3]]$CML)
+  } else y <- do.call(rbind.data.frame,x[[i]]) %>% mutate(CPML = Retained[[i - 3]]$CML)
   
   if(i == 1) y$FileName <- pnames_prelim else y$FileName <- pnames
   return(y)
@@ -786,62 +846,75 @@ debris_count_data$Replicate <- sapply(debris_count_data$FileName,
 ######################## Invasion ####################
 ###Control from Monoculture Experiments
 #Day 1 flow frames from the monoculture experiments is used
-
 counter <- 0
-logtrans_debris_percent_invasion <- lapply(log_transformedSet_invasion[c(1,3:11)],function(x){
+logtrans_debris_percent_invasion <- lapply(logtrans_margin_invasion[c(2, 3:11)],
+                                           function(x) {
   #counter2 <<- counter2 + 1
   debris_percentage <- fsApply(x, function(y){
     counter <<- counter+1
-    if(counter <= 18 & substring(identifier(y),first = nchar(identifier(y))) == "1"){
-        ttt <- celldebris(y, positions = c(F,NA), control = T, control_use = c(T, T), interest = "Both",
+    if(counter <= 18 & substring(identifier(y),first = nchar(identifier(y))) == "1") {
+        ttt <- celldebris(y, control_use = c(T, T), interest = "Both",
                control_flowFrame = c(BS5_control[[2]][[1]], BS5_control[[2]][[1]]),
                b4_control = BS4_control[[2]][[1]],
                b5_control = BS5_control[[2]][[1]])
         a <- ttt$Cell_count
         b <- ttt$N_particle
-      } else if(counter <= 18 & substring(identifier(y), first = nchar(identifier(y))) == "2"){
+        nothers <- ttt$N_others
+        
+      } else if(counter <= 18 & substring(identifier(y), first = nchar(identifier(y))) == "2") {
         #counter <<- counter + 1
-        ttt <- celldebris(y,positions = c(F,NA),control = T,control_use = c(T,T),interest = "Both",
+        ttt <- celldebris(y, control_use = c(T,T),interest = "Both",
                control_flowFrame = c(BS5_control[[2]][[2]], BS5_control[[2]][[2]]),
                b4_control = BS4_control[[2]][[2]],
                b5_control = BS5_control[[2]][[2]])
         a <- ttt$Cell_count
         b <- ttt$N_particle
-      }else if(counter <= 18 & substring(identifier(y),first = nchar(identifier(y))) == "3"){
+        nothers <- ttt$N_others
+        
+      } else if(counter <= 18 & substring(identifier(y),first = nchar(identifier(y))) == "3") {
         #counter <<- counter + 1
-        ttt <- celldebris(y,positions = c(F,NA),control = T,control_use = c(T,T),interest = "Both",
+        ttt <- celldebris(y, control_use = c(T,T),interest = "Both",
                control_flowFrame=c(BS5_control[[2]][[3]],BS5_control[[2]][[3]]),
-               b4_control=BS4_control[[2]][[3]],
-               b5_control=BS5_control[[2]][[3]])
+               b4_control = BS4_control[[2]][[3]],
+               b5_control = BS5_control[[2]][[3]])
         a <- ttt$Cell_count
         b <- ttt$N_particle
-      }else if((counter > 18 & counter <= 36) & substring(identifier(y),
-            first=nchar(identifier(y)))=="1"){
+        nothers <- ttt$N_others
+        
+      } else if((counter > 18 & counter <= 36) & substring(identifier(y),
+            first = nchar(identifier(y))) == "1"){
         #counter <<- counter + 1
-        ttt <- celldebris(y, positions = c(F,NA),control = T,control_use = c(T,T),interest = "Both",
+        ttt <- celldebris(y, control_use = c(T,T),interest = "Both",
                control_flowFrame = c(BS5_control[[2]][[1]], BS5_control[[2]][[1]]),
                b4_control = BS4_control[[2]][[1]],
                b5_control = BS5_control[[2]][[1]])
         a <- ttt$Cell_count
         b <- ttt$N_particle
-      }else if((counter > 18 & counter <= 36) & substring(identifier(y),
-              first=nchar(identifier(y)))=="2"){
-        ttt <- celldebris(y, positions = c(F,NA), control = T, control_use = c(T, T), interest = "Both",
+        nothers <- ttt$N_others
+        
+      } else if((counter > 18 & counter <= 36) & substring(identifier(y),
+              first = nchar(identifier(y))) == "2") {
+        ttt <- celldebris(y, control_use = c(T, T), interest = "Both",
                control_flowFrame = c(BS5_control[[2]][[2]], BS5_control[[2]][[2]]),
                b4_control = BS4_control[[2]][[2]],
                b5_control = BS5_control[[2]][[2]])
         a <- ttt$Cell_count
         b <- ttt$N_particle
-      }else if((counter > 18 & counter <= 36) & substring(identifier(y),
-              first=nchar(identifier(y))) == "3"){
-        ttt <- celldebris(y,positions = c(F, NA), control = T, control_use = c(T, T), interest = "Both",
+        nothers <- ttt$N_others
+        
+      } else if((counter > 18 & counter <= 36) & substring(identifier(y),
+              first = nchar(identifier(y))) == "3") {
+        ttt <- celldebris(y, control_use = c(T, T), interest = "Both",
                control_flowFrame = c(BS5_control[[2]][[3]], BS5_control[[2]][[3]]),
                b4_control = BS4_control[[2]][[3]],
                b5_control = BS5_control[[2]][[3]])
         a <- ttt$Cell_count
         b <- ttt$N_particle
+        nothers <- ttt$N_others
      }
-    return(data.frame(BS4Count = a[1], BS5Count = a[2], ParticleCount = b))
+    return(data.frame(BS4Count = a[1], BS5Count = a[2], ParticleCount = b, 
+                      N_others = nothers, Debriscount = b - (sum(a) + nothers)
+                        ))
   })
   counter <<- 0
   debris <- debris_percentage
@@ -857,14 +930,14 @@ debris_count_invasion_data <- lapply(1:length(logtrans_debris_percent_invasion),
   y <- do.call(rbind.data.frame,x[[i]]) %>% mutate(CPML = gg[[i]]$CML,
                                                    FileName = pnames)
   return(y)
-}, x = logtrans_debris_percent_invasion) %>% do.call(rbind.data.frame,.)
+}, x = logtrans_debris_percent_invasion) %>% do.call(rbind.data.frame, .)
 
-debris_count_invasion_data$OParticleCount <- unlist(ParticleCount_invasion)
+debris_count_invasion_data$OParticleCount <- unlist(ParticleCount_invasion[c(2, 3:11)])
 
 debris_count_invasion_data$Time <- rep(Time_invasion, each = 36)
 debris_count_invasion_data$Treatment <- sapply(debris_count_invasion_data$FileName,
                                       function(x)strsplit(x,"_")[[1]][3])
-debris_count_invasion_data$Treatment[debris_count_invasion_data$Treatment=="Control"] <- "0"
+debris_count_invasion_data$Treatment[debris_count_invasion_data$Treatment == "Control"] <- "0"
 debris_count_invasion_data$Treatment <- factor(debris_count_invasion_data$Treatment,
                                       unique(debris_count_invasion_data$Treatment)[6:1])
 debris_count_invasion_data$Resident_Species <- sapply(debris_count_invasion_data$FileName,
@@ -1076,31 +1149,46 @@ write.csv(jurgsform, "Data/Jurg_Monoculture.csv", row.names = F)
 
 ##################### Invasion Experiment ##################
 debris_count_invasion_data$Dilution <- rep(2000, 360)
+debris_count_invasion_data$Dilution[19:21] <- 100
 debris_count_invasion_data$Invader <- if_else(debris_count_invasion_data$Resident_Species == 4, 5, 4)
-#debris_count_invasion_data$Dilution[debris_count_invasion_data$Time != 41] <- 2000
-#debris_count_invasion_data$Dilution[debris_count_invasion_data$Time == 41] <- 2000
-#debris_count_invasion_data$Dilution[debris_count_invasion_data$Time == 41 &
-#                                    debris_count_invasion_data$Species=="5" &
-#                                    debris_count_invasion_data$Treatment=="400"] <- 100
 
-debris_count_invasion_data <- debris_count_invasion_data %>% mutate(BS4Abundance = (BS4Count/ParticleCount) * CPML * as.numeric(Dilution),
- BS5Abundance = (BS5Count/ParticleCount) * CPML * as.numeric(Dilution),
+debris_count_invasion_data <- debris_count_invasion_data %>% 
+  mutate(BS4Abundance = (BS4Count/OParticleCount) * CPML * as.numeric(Dilution),
+ BS5Abundance = (BS5Count/OParticleCount) * CPML * as.numeric(Dilution),
  Resident_Species = as.numeric(Resident_Species),
  Replicate = as.numeric(Replicate))
 
+#merging the datasets together
+logtrans_margin_invasion_dataset$Prelim$File <- good_measurements_invasion$Prelim$Filename
+logtrans_margin_invasion_dataset <- do.call(rbind.data.frame, 
+                                            logtrans_margin_invasion_dataset[c(2, 3:11)])
+debris_count_invasion_data <- cbind(debris_count_invasion_data, 
+                                    logtrans_margin_invasion_dataset)
+debris_count_invasion_data <- debris_count_invasion_data %>% dplyr::select(FileName, Resident_Species,
+                                                         Invader, Treatment, Dilution, 
+                                                         Time, Replicate, CPML, BS4Count, BS5Count,
+                                                         Debriscount, 
+                                                         ParticleCount, 
+                                                         OtherCount = N_others, 
+                                                         MarginCount = nmargin, 
+                                                         FParticleCount = nparticle,
+                                                         OParticleCount, BS4Abundance, 
+                                                         BS5Abundance)
+
+
 #plotting
-debris_count_invasion_data %>% ggplot(aes(x=Time)) + 
-  geom_point(aes(shape=Treatment,y=log(BS4Abundance),group=Treatment,color=Treatment)) +
-  geom_point(aes(shape=Treatment,y=log(BS5Abundance),group=Treatment,color=Treatment)) +
-  facet_grid(Replicate~Resident_Species) + theme_bw() + ggtitle("BS4 Abundance (Invasion)") +
-  geom_line(aes(y=log(BS4Abundance),group=Treatment,color=Treatment),linetype="solid") +
-  geom_line(aes(y=log(BS5Abundance),group=Treatment,color=Treatment),linetype="dashed") 
+debris_count_invasion_data %>% ggplot(aes(x = Time)) + 
+  geom_point(aes(shape = Treatment, y = log(BS4Abundance), group = Treatment, color = Treatment)) +
+  geom_point(aes(shape = Treatment, y = log(BS5Abundance), group = Treatment, color = Treatment)) +
+  facet_grid(Replicate ~ Resident_Species) + theme_bw() + ggtitle("BS4 Abundance (Invasion)") +
+  geom_line(aes(y = log(BS4Abundance), group = Treatment, color = Treatment), linetype = "solid") +
+  geom_line(aes(y = log(BS5Abundance), group = Treatment, color = Treatment), linetype = "dashed") 
 
 jurgsform_invasion <- data.table::dcast(data.table::setDT(debris_count_invasion_data),
                                            Time + Treatment + Invader ~ Replicate,
                  value.var = c("BS4Abundance", "BS5Abundance"))
 
-write.csv(jurgsform_invasion, "Data/Jurg_Invasion.csv", row.names = F)
+write.csv(debris_count_invasion_data, "Data/Abundance_Invasion.csv", row.names = F)
 
 
 ###Plotting both invasion and monoculture experiments together

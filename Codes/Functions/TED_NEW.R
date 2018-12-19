@@ -1,7 +1,7 @@
 
 #source("distances.R")
 
-base_traitmatrix_new <- function(x, rescale = F, n_gen = 1500){
+base_traitmatrix_new <- function(x, rescale = F, n_gen = 1500) {
   
   #rescale to 0-1 range
   if(rescale == F) x_rescale <- x else x_rescale <- rescale(x)
@@ -21,8 +21,8 @@ base_traitmatrix_new <- function(x, rescale = F, n_gen = 1500){
   
   N <- 0
   test_data <- data.frame()
-  #mn <- apply(x_rescale, 2, min); mx <- apply(x_rescale, 2, max)
-  while(N <= nrow(x_rescale)){
+  mn <- apply(x_rescale, 2, min); mx <- apply(x_rescale, 2, max)
+  while(N <= nrow(x_rescale)) {
     #generate data from uniform distribution
     test <- runif(ncol(x_rescale), apply(x_rescale, 2, min),
           apply(x_rescale, 2, max))

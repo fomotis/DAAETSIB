@@ -38,8 +38,9 @@
    #BS4
    bs4_1 <- flowDensity::flowDensity(bs4s, channels = c(p1, p2), position = c(NA, F),
                                      use.percentile = c(F, T),
-                                     percentile = c(0.975, 0.975), use.control = c(T, T),
+                                     percentile = c(0.975, 0.90), use.control = c(T, T),
                                      control = c(day1_2, day1_2), ellip.gate = T)
+   
    others_nk <- others_bs4[which(is.na(bs4_1@flow.frame@exprs[, 1]))]
    bs4_others <- others_bs4[which(!is.na(bs4_1@flow.frame@exprs[, 1]))]
    #plotting

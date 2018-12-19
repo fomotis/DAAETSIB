@@ -26,8 +26,8 @@ debris_c <- function(flowframe, p1, p2, control_flowFrame) {
 
   #reduced_flowframe containing BS4 and BS5 only
   bs4bs5 <- flowframe[which(is.na(flowCore::exprs(debris@flow.frame)[, 1])), ]
+  
   #plotting (plot1)
-  #graphics::par(mfrow = c(1, 2))
   flowDensity::plotDens(flowframe, c(p1, p2), xlab = p1, ylab = p2,
                         main = paste0("ID = ", flowCore::identifier(flowframe)), frame.plot = F)
   #Debris Filter

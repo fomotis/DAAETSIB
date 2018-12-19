@@ -101,13 +101,13 @@ data_monoculture <- read_csv("Data/Abundance_Monoculture.csv", col_types =
 ## Full Model
 
 ```{r}
-#The differential equation (Lotka - Voltera, Jurg's form)
+#The differential equation (Lotka - Voltera, Normal form)
 ltk1 <- function (Time, abd, parms, ...) {
     mu <- parms$mu
-    A <- parms$A
+    K <- parms$K
     #mu =  inherent growth per-capita
     #A = ratio of mu and carrying capacity
-    dABD <- (mu - A * abd) * abd
+    dABD <- mu * abd * (1 -  (abd/K)) 
     list(dABD)
 }
 ```
@@ -146,8 +146,8 @@ abd_400$Fit <- map2(.x = abd_400$data, .y = titles, function(.x, .y) {
     return(pcgr)
   }, x = y, y = times_obs)
   #initial values for parameters
-  parms <- c(mu = max(PCGR, na.rm = T), A = max(PCGR, na.rm = T) / max(y))
-  out1 <- ode(y = y0, times = times, func = ltk1, parms = list(A = parms[2], mu = parms[1]))
+  parms <- c(mu = max(PCGR, na.rm = T), K = max(y))
+  out1 <- ode(y = y0, times = times, func = ltk1, parms = list(K = parms[2], mu = parms[1]))
   out1 <- as.data.frame(out1)
   names(out1) <- c("time", "y")
   #plotting
@@ -156,10 +156,10 @@ abd_400$Fit <- map2(.x = abd_400$data, .y = titles, function(.x, .y) {
   #residual from the ODE start
   ss2a <- function(parms) {
     #parameters
-    A <- parms[2]
+    K <- parms[2]
     mu <- parms[1]
     # 
-    out1 <- deSolve::ode(y = y0, times = times, func = ltk1, parms = list(A = A, mu = mu))
+    out1 <- deSolve::ode(y = y0, times = times, func = ltk1, parms = list(K = K, mu = mu))
     #filtering out the observed data
     out1_df <- as.data.frame(out1)
     names(out1_df) <- c("time", "y")
@@ -169,14 +169,15 @@ abd_400$Fit <- map2(.x = abd_400$data, .y = titles, function(.x, .y) {
     as.numeric(out1_df$y - y[, 1])
   }
   ## non-linear leasy squares minimization
-  de_model <- minpack.lm::nls.lm(par = parms, fn = ss2a)
+  de_model <- minpack.lm::nls.lm(par = parms, fn = ss2a, lower = c(mu = 1.0E-5, K = 1.0E-5), 
+                                 control = nls.lm.control(maxiter = 100))
   de_model_summary <- summary(de_model)
   
   Sig_ode <- de_model_summary$sigma
   
   #predictions based on the estimated parameters from Non-Linear Least Squares
   out_ode <- deSolve::ode(y = y0, times = times_obs, func = ltk1, 
-                          parms = list(A = coef(de_model)[2], 
+                          parms = list(K = coef(de_model)[2], 
                                        mu = coef(de_model)[1]))
   out_ode_df <- as.data.frame(out_ode); names(out_ode_df) <- c("time", "y")
   
@@ -222,11 +223,12 @@ abd_400$Fit <- map2(.x = abd_400$data, .y = titles, function(.x, .y) {
   #                     labels = c("Initial", "NLS", "AR-1"))
   print(plot1)
   results <- list(Performance = ode_perf, 
-                  Estimates = data.frame(Parameter = c("mu", "A"), ode_reults)
+                  Estimates = data.frame(Parameter = c("mu", "K"), ode_reults)
                  )
   return(results)
   
 } )
+
 #Estimates
 abd_400$Estimates <- map(.x = abd_400$Fit, function(.x) {
   return(.x$Estimates)
@@ -236,7 +238,7 @@ abd_400$Performance <- map(.x = abd_400$Fit, function(.x) {
   return(.x$Performance)
 })
 
-plotdata1 <- abd_400 %>% unnest(Estimates)
+plotdata1 <- abd_400 %>% unnest(Estimates) %>% dplyr::filter( Treatment != 400)
 #parameter estimates plus standard error
 map(unique(plotdata1$Parameter), function(.x) {
   plotdata1 %>% dplyr::filter(Parameter == .x) %>% ggplot(aes(x = Treatment, y = Est, group = 1)) + 
@@ -267,6 +269,14 @@ performance_data %>% ggplot(aes(x = Treatment, y = AIC, group = Model,
   labs(x = "Treatment", y = "AIC")
 ```
 
+
+
+### Residual Analysis
+
+```{r}
+
+
+```
 
 ##  Univariate AR(1) Models for TOP and Density
 
